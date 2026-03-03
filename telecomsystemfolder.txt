@@ -1,0 +1,85 @@
+telecom-system/
+│
+├── backend/
+│   ├── api/
+│   │   ├── auth.php                # Login, registration, token
+│   │   ├── wallet.php              # Credits: recharge, deduct, balance
+│   │   ├── calls.php               # Call API (VoIP minutes handling)
+│   │   ├── sms.php                 # SMS API (send, receive, logs)
+│   │   ├── ussd.php                # USSD session handler
+│   │   ├── data.php                # Internet bundles, subscriptions
+│   │   └── bank_bridge.php         # Connects to Bank A/B APIs (cash-in/cash-out)
+│   │
+│   ├── config/
+│   │   ├── db.php                  # Database connection (MySQL/Postgres)
+│   │   ├── telecom_config.php      # Prices per min/SMS/MB, bundles
+│   │   └── security.php            # Token validation, encryption
+│   │
+│   ├── models/
+│   │   ├── User.php                # User details, SIM/account
+│   │   ├── Wallet.php              # Credit logic
+│   │   ├── Transaction.php         # Logs all activities
+│   │   └── Subscription.php        # Internet/data bundles
+│   │
+│   └── utils/
+│       ├── sms_gateway.php         # Interface with Kannel/Twilio
+│       ├── call_gateway.php        # Interface with Asterisk/FreeSWITCH
+│       ├── ussd_engine.php         # Session menus
+│       └── mesh_router.php         # (Optional) Mesh/WiFi communication handler
+│
+├── frontend/
+│   ├── web/
+│   │   ├── index.html              # Customer portal
+│   │   ├── dashboard.js            # JS for balance, bundles, logs
+│   │   ├── calls.html              # VoIP web calling
+│   │   └── sms.html                # Send/receive SMS
+│   │
+│   └── mobile-app/
+│       ├── android/                # Android app code (Java/Kotlin/Flutter)
+│       └── ios/                    # iOS app code (Swift/Flutter)
+│
+├── docs/
+│   ├── api_docs.md                 # API usage docs
+│   └── system_design.md            # Architecture diagram + explanation
+│
+└── database/
+    ├── schema.sql                  # Tables (users, wallets, transactions, calls, sms, bundles)
+    └── seed.sql                    # Sample data
+
+
+
+cazacom-backend/
+│── config/
+│   ├── db.php            # Database connection (MySQL/Postgres)
+│   ├── env.php           # Environment variables
+│
+│── models/
+│   ├── User.php          # User & KYC logic
+│   ├── Wallet.php        # Wallet & transactions
+│   ├── Call.php          # Call session tracking
+│   ├── Sms.php           # SMS logic
+│   ├── Ussd.php          # USSD menus
+│   ├── Data.php          # Internet subscriptions
+│
+│── controllers/
+│   ├── AuthController.php
+│   ├── WalletController.php
+│   ├── CallController.php
+│   ├── SmsController.php
+│   ├── UssdController.php
+│   ├── DataController.php
+│
+│── routes/
+│   ├── api.php           # Define all API endpoints
+│
+│── public/
+│   ├── index.php         # Entry point
+│
+│── services/
+│   ├── VoipService.php   # WebRTC/SIP integration
+│   ├── SmsGateway.php    # SMS integration
+│   ├── RouterService.php # Handle router “satellite” comms
+│
+│── logs/
+│── vendor/
+│── tests/
