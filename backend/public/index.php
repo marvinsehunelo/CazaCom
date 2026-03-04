@@ -701,8 +701,9 @@ body {
 /* Injected safe PHP vars */
 const loggedInUser = <?= json_encode($loggedInUserId) ?>;
 const loggedInUserPhone = <?= json_encode($loggedInUserPhone) ?>;
-const baseApiUrl = window.location.origin + '/CazaCom/backend/routes/api.php'; 
-let currentTransferAction = null;
+const isRailway = window.location.hostname.includes('railway.app') || window.location.hostname.includes('up.railway.app');
+const basePath = isRailway ? '' : '/CazaCom';
+const baseApiUrl = window.location.origin + basePath + '/backend/routes/api.php';let currentTransferAction = null;
 
 // --- Core API Call Utility ---
 async function apiCall(endpoint, params = {}, method = 'GET') {
@@ -1135,4 +1136,5 @@ document.addEventListener('DOMContentLoaded', () => {
 </script>
 </body>
 </html>
+
 
