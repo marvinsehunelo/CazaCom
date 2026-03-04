@@ -703,7 +703,7 @@ const loggedInUser = <?= json_encode($loggedInUserId) ?>;
 const loggedInUserPhone = <?= json_encode($loggedInUserPhone) ?>;
 const isRailway = window.location.hostname.includes('railway.app') || window.location.hostname.includes('up.railway.app');
 const basePath = isRailway ? '' : '/CazaCom';
-const baseApiUrl = window.location.origin + basePath + '/routes/api.php';
+const baseApiUrl = window.location.origin + basePath + '/backend/routes/api.php';
 let currentTransferAction = null;
 
 // --- Core API Call Utility ---
