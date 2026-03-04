@@ -3,6 +3,8 @@
 if (session_status() === PHP_SESSION_NONE) {
     session_start();
 }
+error_log("Session ID: " . session_id());
+error_log("Session data: " . print_r($_SESSION, true));
 
 // Check for required session data. Redirect to login if user is not authenticated.
 if (!isset($_SESSION['user']) || !isset($_SESSION['user']['id'])) {
@@ -1133,3 +1135,4 @@ document.addEventListener('DOMContentLoaded', () => {
 </script>
 </body>
 </html>
+
