@@ -1,8 +1,20 @@
 [phases.setup]
-nixPkgs = ["php83", "php83Extensions.pdo_pgsql", "php83Extensions.pgsql"]
+nixPkgs = ["php83", "php83Extensions.pdo_pgsql", "php83Extensions.pgsql", "apacheHttpd"]
 
 [phases.install]
 cmds = ["cd backend && composer install --no-dev"]
 
+[phases.setup]
+# Create Apache config
+cmds = [
+    "echo 'ServerName localhost' > /etc/apache2/apache2.conf",
+    "echo 'DocumentRoot /app/backend/public' >> /etc/apache2/apache2.conf",
+    "echo '<Directory /app/backend/public>' >> /etc/apache2/apache2.conf",
+    "echo '    Options Indexes FollowSymLinks' >> /etc/apache2/apache2.conf",
+    "echo '    AllowOverride All' >> /etc/apache2/apache2.conf",
+    "echo '    Require all granted' >> /etc/apache2/apache2.conf",
+    "echo '</Directory>' >> /etc/apache2/apache2.conf"
+]
+
 [start]
-cmd = "cd backend && php -S 0.0.0.0:$PORT -t public"
+cmd = "apache2ctl -D FOREGROUND"
