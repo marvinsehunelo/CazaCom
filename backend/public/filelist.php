@@ -1,6 +1,6 @@
 <?php
 // Folder you want to check
-$folder = __DIR__ . "/../CazaCom"; // Adjust path if needed
+$folder = __DIR__ . "/../../../CazaCom"; // Adjust path if needed
 
 // Check if directory exists
 if (!is_dir($folder)) {
