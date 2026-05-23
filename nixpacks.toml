@@ -2,7 +2,11 @@
 nixPkgs = ["php83", "php83Extensions.pdo_pgsql", "php83Extensions.pgsql"]
 
 [phases.install]
-cmds = ["composer install --no-dev"]
+cmds = [
+    "composer install --no-dev",
+    "mkdir -p backend/public",
+    "ln -sf $(pwd)/public/* backend/public/ || cp -r public/* backend/public/"
+]
 
 [start]
-cmd = "php -S 0.0.0.0:$PORT -t public"
+cmd = "php -S 0.0.0.0:$PORT -t ."
