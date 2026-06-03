@@ -538,3 +538,35 @@ SELECT
     message,
     created_at
 FROM instant_sms_outbox;
+
+
+CREATE TABLE IF NOT EXISTS settlement_transactions (
+    id BIGSERIAL PRIMARY KEY,
+    reference VARCHAR(100) UNIQUE NOT NULL,
+    user_id INTEGER REFERENCES users(id),
+    amount NUMERIC(20,2) NOT NULL,
+    type VARCHAR(20) NOT NULL,
+    status VARCHAR(20) DEFAULT 'pending',
+    external_reference VARCHAR(100),
+    error_message TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS internal_transfers (
+    id BIGSERIAL PRIMARY KEY,
+    reference VARCHAR(100) UNIQUE NOT NULL,
+    user_id INTEGER REFERENCES users(id),
+    transfer_type VARCHAR(50) NOT NULL,
+    amount NUMERIC(20,2) NOT NULL,
+    status VARCHAR(20) DEFAULT 'pending',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS alerts (
+    id BIGSERIAL PRIMARY KEY,
+    type VARCHAR(50) NOT NULL,
+    severity VARCHAR(20) NOT NULL,
+    message TEXT NOT NULL,
+    is_resolved BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
