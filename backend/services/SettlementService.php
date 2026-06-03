@@ -5,18 +5,31 @@ class SettlementService {
     private $db;
     private $saccussalisApiUrl;
     private $apiKey;
+    private $apiToken;
     
     public function __construct($db) {
         $this->db = $db;
-        $this->saccussalisApiUrl = getenv('SACCUSSALIS_API_URL') ?: 'https://saccussalis.com/api';
+        $this->saccussalisApiUrl = getenv('SACCUSSALIS_API_URL') ?: 'https://saccussalis.com';
         $this->apiKey = getenv('SACCUSSALIS_API_KEY') ?: 'SACCUS_INTERNAL_KEY_2025';
+        $this->apiToken = getenv('SACCUSSALIS_API_TOKEN') ?: $this->getApiTokenFromDb();
+    }
+    
+    private function getApiTokenFromDb() {
+        try {
+            $stmt = $this->db->prepare("SELECT token FROM api_tokens WHERE client_name = 'cazacom' AND active = true LIMIT 1");
+            $stmt->execute();
+            $result = $stmt->fetch(PDO::FETCH_ASSOC);
+            return $result['token'] ?? null;
+        } catch (Exception $e) {
+            return null;
+        }
     }
     
     public function recordOutgoingSettlement($user_id, $amount, $destinationBankAccount = null) {
         $reference = 'OUT-' . time() . '-' . $user_id . '-' . bin2hex(random_bytes(4));
         
         try {
-            $response = $this->callSaccussalisApi('/settlement/debit', [
+            $response = $this->callSaccussalisApi('settlement/debit', [
                 'amount' => $amount,
                 'currency' => 'BWP',
                 'reference' => $reference,
@@ -63,7 +76,7 @@ class SettlementService {
         $reference = 'IN-' . time() . '-' . $user_id . '-' . bin2hex(random_bytes(4));
         
         try {
-            $response = $this->callSaccussalisApi('/settlement/credit', [
+            $response = $this->callSaccussalisApi('settlement/credit', [
                 'amount' => $amount,
                 'currency' => 'BWP',
                 'reference' => $reference,
@@ -160,9 +173,24 @@ class SettlementService {
         }
     }
     
-    private function getTrustAccountBalance() {
-        $response = $this->callSaccussalisApi('/accounts/trust/balance', []);
-        return $response['balance'] ?? 0;
+    public function getTrustAccountBalance() {
+        try {
+            $response = $this->callSaccussalisApi('accounts/trust/balance', [], 'GET');
+            return $response['balance'] ?? 0;
+        } catch (Exception $e) {
+            error_log("Failed to get trust balance: " . $e->getMessage());
+            return 0;
+        }
+    }
+    
+    public function getDailyReconciliation() {
+        try {
+            $response = $this->callSaccussalisApi('reconciliation/daily', [], 'POST', true);
+            return $response;
+        } catch (Exception $e) {
+            error_log("Failed to get daily reconciliation: " . $e->getMessage());
+            return ['status' => 'error', 'message' => $e->getMessage()];
+        }
     }
     
     private function getTotalCustomerBalances() {
@@ -186,27 +214,60 @@ class SettlementService {
         $stmt->execute(['adjustment' => $adjustment]);
     }
     
-    private function callSaccussalisApi($endpoint, $data) {
-        $ch = curl_init($this->saccussalisApiUrl . $endpoint);
+    private function callSaccussalisApi($endpoint, $data, $method = 'POST', $isInternal = false) {
+        // Build URL with path parameter
+        $url = rtrim($this->saccussalisApiUrl, '/') . '/backend/api.php?path=' . $endpoint;
+        
+        $ch = curl_init($url);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-        curl_setopt($ch, CURLOPT_POST, true);
-        curl_setopt($ch, CURLOPT_HTTPHEADER, [
-            'Content-Type: application/json',
-            'X-Internal-Key: ' . $this->apiKey,
-            'X-Source-System: CAZACOM'
-        ]);
-        curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
         curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+        
+        $headers = [
+            'Content-Type: application/json',
+            'Accept: application/json'
+        ];
+        
+        // Add authentication based on type
+        if ($isInternal) {
+            $headers[] = 'X-Internal-Key: ' . $this->apiKey;
+        } else {
+            // Use Bearer token for regular API calls
+            if ($this->apiToken) {
+                $headers[] = 'Authorization: Bearer ' . $this->apiToken;
+            }
+        }
+        
+        $headers[] = 'X-Source-System: CAZACOM';
+        
+        if ($method === 'POST') {
+            curl_setopt($ch, CURLOPT_POST, true);
+            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode($data));
+        } elseif ($method === 'GET' && !empty($data)) {
+            $url .= '&' . http_build_query($data);
+            curl_setopt($ch, CURLOPT_URL, $url);
+        }
+        
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
         
         $response = curl_exec($ch);
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $curlError = curl_error($ch);
         curl_close($ch);
+        
+        if ($curlError) {
+            throw new Exception("CURL error: {$curlError}");
+        }
         
         if ($httpCode !== 200) {
             throw new Exception("API call failed with HTTP {$httpCode}: {$response}");
         }
         
-        return json_decode($response, true);
+        $decoded = json_decode($response, true);
+        if (!$decoded) {
+            throw new Exception("Invalid JSON response: {$response}");
+        }
+        
+        return $decoded;
     }
     
     private function getUserPhone($user_id) {
@@ -225,5 +286,19 @@ class SettlementService {
         $stmt->execute(['message' => $message]);
         
         error_log($message);
+    }
+    
+    public function getSettlementStatus($reference) {
+        $stmt = $this->db->prepare("
+            SELECT * FROM settlement_transactions 
+            WHERE reference = :ref 
+            LIMIT 1
+        ");
+        $stmt->execute(['ref' => $reference]);
+        return $stmt->fetch(PDO::FETCH_ASSOC);
+    }
+    
+    public function getTrustBalanceFromApi() {
+        return $this->getTrustAccountBalance();
     }
 }
