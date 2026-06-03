@@ -2,11 +2,8 @@
 // Root directory
 $rootDir = __DIR__;
 
-// Optional IP restriction
-$allowedIP = '127.0.0.1';
-if ($_SERVER['REMOTE_ADDR'] !== $allowedIP) {
-    exit('Access denied');
-}
+// No IP restriction - allow all access for testing
+// Remove or comment out the IP check
 
 function listDir(string $dir, int $level = 0): void
 {
@@ -27,4 +24,4 @@ function listDir(string $dir, int $level = 0): void
 
 header('Content-Type: text/plain');
 listDir($rootDir);
-
+?>
