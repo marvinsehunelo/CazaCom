@@ -31,4 +31,33 @@ try {
     $stmt = $db->prepare("
         INSERT INTO cashout_tokens 
         (token_reference, beneficiary_phone, amount, pin_code, expires_at, source_reference, status)
-        VALUES (:ref, :
+        VALUES (:ref, :phone, :amount, :pin, :expires, :src, 'ACTIVE')
+    ");
+    $stmt->execute([
+        'ref' => $tokenReference,
+        'phone' => $beneficiaryPhone,
+        'amount' => $amount,
+        'pin' => password_hash($atmPin, PASSWORD_DEFAULT),
+        'expires' => $expiry,
+        'src' => $reference
+    ]);
+    
+    $db->commit();
+    
+    echo json_encode([
+        "status" => "success",
+        "token_generated" => true,
+        "token_reference" => $tokenReference,
+        "atm_pin" => $atmPin,
+        "expires_at" => $expiry,
+        "amount" => $amount
+    ]);
+    
+} catch (Exception $e) {
+    $db->rollBack();
+    echo json_encode([
+        "status" => "error",
+        "message" => $e->getMessage(),
+        "token_generated" => false
+    ]);
+}
