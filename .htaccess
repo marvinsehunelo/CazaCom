@@ -1,0 +1,40 @@
+# /cazacom/.htaccess
+RewriteEngine On
+RewriteBase /
+
+# Remove .php extension from URLs
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^([^\.]+)$ $1.php [L]
+
+# API routes - remove .php from API endpoints
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^api/v1/mno/([^/]+)$ api/v1/mno/$1.php [L,QSA]
+
+# Handle MNO specific endpoints without .php
+RewriteRule ^mno/verify_wallet$ mno/verify_wallet.php [L]
+RewriteRule ^mno/hold$ mno/hold.php [L]
+RewriteRule ^mno/release_hold$ mno/release_hold.php [L]
+RewriteRule ^mno/debit$ mno/debit.php [L]
+RewriteRule ^mno/credit$ mno/credit.php [L]
+RewriteRule ^mno/generate_code$ mno/generate_code.php [L]
+RewriteRule ^mno/verify_code$ mno/verify_code.php [L]
+RewriteRule ^mno/confirm_cashout$ mno/confirm_cashout.php [L]
+RewriteRule ^mno/balance$ mno/balance.php [L]
+RewriteRule ^mno/transactions$ mno/transactions.php [L]
+RewriteRule ^mno/airtime$ mno/airtime.php [L]
+
+# OAuth endpoints
+RewriteRule ^oauth/authorize$ oauth/authorize.php [L]
+RewriteRule ^oauth/token$ oauth/token.php [L]
+RewriteRule ^oauth/revoke$ oauth/revoke.php [L]
+RewriteRule ^oauth/userinfo$ oauth/userinfo.php [L]
+
+# Health check
+RewriteRule ^health$ health.php [L]
+
+# Default - route all other requests through index.php
+RewriteCond %{REQUEST_FILENAME} !-f
+RewriteCond %{REQUEST_FILENAME} !-d
+RewriteRule ^ index.php [L]
