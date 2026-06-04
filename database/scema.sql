@@ -570,3 +570,98 @@ CREATE TABLE IF NOT EXISTS alerts (
     is_resolved BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+
+CREATE TABLE IF NOT EXISTS oauth_clients (
+    id SERIAL PRIMARY KEY,
+    client_id VARCHAR(100) UNIQUE NOT NULL,
+    client_secret VARCHAR(255) NOT NULL,
+    name VARCHAR(255),
+    redirect_uri TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS oauth_access_tokens (
+    id SERIAL PRIMARY KEY,
+    token VARCHAR(255) UNIQUE NOT NULL,
+    client_id INTEGER REFERENCES oauth_clients(id),
+    user_id INTEGER REFERENCES users(id),
+    scope TEXT,
+    expires_at TIMESTAMP NOT NULL,
+    revoked BOOLEAN DEFAULT FALSE,
+    revoked_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS oauth_refresh_tokens (
+    id SERIAL PRIMARY KEY,
+    token VARCHAR(255) UNIQUE NOT NULL,
+    access_token VARCHAR(255) REFERENCES oauth_access_tokens(token),
+    client_id INTEGER REFERENCES oauth_clients(id),
+    user_id INTEGER REFERENCES users(id),
+    expires_at TIMESTAMP NOT NULL,
+    revoked BOOLEAN DEFAULT FALSE,
+    revoked_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS oauth_authorization_codes (
+    id SERIAL PRIMARY KEY,
+    code VARCHAR(255) UNIQUE NOT NULL,
+    client_id INTEGER REFERENCES oauth_clients(id),
+    user_id INTEGER REFERENCES users(id),
+    redirect_uri TEXT,
+    scope TEXT,
+    expires_at TIMESTAMP NOT NULL,
+    used BOOLEAN DEFAULT FALSE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS financial_holds (
+    id BIGSERIAL PRIMARY KEY,
+    hold_reference VARCHAR(100) UNIQUE NOT NULL,
+    user_id INTEGER REFERENCES users(id),
+    amount NUMERIC(20,2) NOT NULL,
+    status VARCHAR(20) DEFAULT 'HELD',
+    expires_at TIMESTAMP NOT NULL,
+    source_reference VARCHAR(100),
+    destination TEXT,
+    release_reason TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    released_at TIMESTAMP,
+    committed_at TIMESTAMP
+);
+
+REATE TABLE IF NOT EXISTS cashout_tokens (
+    id BIGSERIAL PRIMARY KEY,
+    token_reference VARCHAR(100) UNIQUE NOT NULL,
+    beneficiary_phone VARCHAR(20) NOT NULL,
+    amount NUMERIC(20,2) NOT NULL,
+    pin_code VARCHAR(255) NOT NULL,
+    expires_at TIMESTAMP NOT NULL,
+    source_reference VARCHAR(100),
+    status VARCHAR(20) DEFAULT 'ACTIVE',
+    dispensed_notes TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    completed_at TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS settlement_obligations (
+    id BIGSERIAL PRIMARY KEY,
+    reference VARCHAR(100) UNIQUE NOT NULL,
+    from_participant VARCHAR(50) NOT NULL,
+    to_participant VARCHAR(50) NOT NULL,
+    amount NUMERIC(20,2) NOT NULL,
+    status VARCHAR(20) DEFAULT 'PENDING',
+    settled_at TIMESTAMP,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS encryption_keys (
+    id SERIAL PRIMARY KEY,
+    key_id VARCHAR(100) NOT NULL,
+    key_value TEXT NOT NULL,
+    active BOOLEAN DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    retired_at TIMESTAMP
+);
