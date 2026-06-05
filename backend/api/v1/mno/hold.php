@@ -3,7 +3,20 @@
 
 header("Content-Type: application/json; charset=utf-8");
 
-require_once __DIR__ . '/../../config/db.php';
+require_once __DIR__ . '/../../../config/db.php';
+require_once __DIR__ . '/../../../security/ApiAuthenticator.php';
+
+use Cazacom\Security\ApiAuthenticator;
+
+$pdo = new PDO(getenv('DATABASE_URL'));
+$auth = new ApiAuthenticator($pdo);
+$client = $auth->authenticate();
+
+if (!in_array('initiate_payment', $client['scopes'])) {
+    http_response_code(403);
+    echo json_encode(['error' => 'insufficient_scope', 'message' => 'initiate_payment scope required']);
+    exit;
+}
 
 $database = new Database();
 $db = $database->getConnection();
