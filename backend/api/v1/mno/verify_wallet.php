@@ -21,7 +21,7 @@ if (!in_array('read_balance', $client['scopes'])) {
     echo json_encode(['error' => 'insufficient_scope', 'message' => 'read_balance scope required']);
     exit;
 }
-
+ 
 $database = new Database();
 $db = $database->getConnection();
 
