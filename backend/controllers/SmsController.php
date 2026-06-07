@@ -14,7 +14,7 @@ class SmsController {
     }
 
     /**
-     * Send SMS - FIXED parameter order to match Sms.php
+     * Send SMS - FIXED parameter order
      * @param string $recipientNumber - The phone number to send to
      * @param string $message - The message content
      * @param int $userId - Optional user ID (default 0 for system)
@@ -22,7 +22,7 @@ class SmsController {
     public function sendSms($recipientNumber, $message, $userId = 0) {
         // Determine sender number
         $senderNumber = "SYSTEM";
-        $senderUserId = null;  // null for system, not 0
+        $senderUserId = null;
         
         if ($userId > 0) {
             $stmt = $this->db->prepare("SELECT id, phone_number FROM users WHERE id = ?");
@@ -44,14 +44,14 @@ class SmsController {
         }
 
         // Save "sent" record for sender
-        // CORRECT ORDER: user_id, sender_number, target_number, message, cost, direction
+        // ORDER: user_id, sender_number, target_number, message, cost, direction
         $this->smsModel->saveSms(
-            $senderUserId,      // user_id (int or null)
-            $senderNumber,      // sender_number (string)
-            $recipientNumber,   // target_number (string)
-            $message,           // message (string)
-            0,                  // cost (float/int)
-            'sent'              // direction (string)
+            $senderUserId,      // user_id (null for system)
+            $senderNumber,      // sender_number
+            $recipientNumber,   // target_number
+            $message,           // message
+            0,                  // cost
+            'sent'              // direction
         );
 
         // Find recipient user (if exists)
@@ -62,24 +62,20 @@ class SmsController {
         // Save "received" record for recipient
         if ($recipient) {
             $this->smsModel->saveSms(
-                $recipient['id'],           // user_id (int)
-                $senderNumber,              // sender_number (string)
-                $recipient['phone_number'], // target_number (string)
-                $message,                   // message (string)
-                0,                          // cost (float/int)
-                'received'                  // direction (string)
+                $recipient['id'],           // user_id
+                $senderNumber,              // sender_number
+                $recipient['phone_number'], // target_number
+                $message,                   // message
+                0,                          // cost
+                'received'                  // direction
             );
         }
-
-        // Send through gateway
-        $gatewayResult = SmsGateway::sendSms($userId, $recipientNumber, $message);
 
         return [
             "status" => "success", 
             "message" => "SMS sent successfully",
             "to" => $recipientNumber,
-            "from" => $senderNumber,
-            "gateway_response" => $gatewayResult
+            "from" => $senderNumber
         ];
     }
 
