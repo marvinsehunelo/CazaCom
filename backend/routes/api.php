@@ -523,6 +523,19 @@ if ($route[3] === true) {
     $userId = authenticateApiRequest($db);
 }
 
+// Add this temporary test route
+"test/env" => ["GET", null, null, false, [], function($db, $userId, $data) {
+    return [
+        "status" => "success",
+        "cazacom_api_key_configured" => !empty(getenv('CAZACOM_API_KEY')),
+        "cazacom_api_key_prefix" => getenv('CAZACOM_API_KEY') ? substr(getenv('CAZACOM_API_KEY'), 0, 10) . '...' : null,
+        "railway_env" => getenv('RAILWAY_ENVIRONMENT') ?: 'not_set',
+        "all_vars" => array_keys(array_filter($_SERVER, function($key) {
+            return strpos($key, 'CAZACOM') !== false || strpos($key, 'RAILWAY') !== false;
+        }, ARRAY_FILTER_USE_KEY))
+    ];
+}],
+
 // Execute route
 try {
     if (isset($route[6]) && is_callable($route[6])) {
