@@ -547,7 +547,7 @@ try {
         } elseif ($methodName === "ussdTransfer") {
             $response = $controller->$methodName($data['phone'], $data['amount'], $data['pin']);
         } elseif ($methodName === "sendSms") {
-            $response = $controller->$methodName(0, $data['recipient_number'], $data['message']);
+            $response = $controller->$sendSms(0, $data['recipient_number'], $data['message'], $userId);
         } else {
             $response = $controller->$methodName($userId, $data);
         }
