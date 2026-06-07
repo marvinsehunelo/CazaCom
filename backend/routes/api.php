@@ -1,4 +1,6 @@
 <?php
+// routes/api.php - CAZACOM VERSION with Handshake Support
+
 header("Content-Type: application/json");
 
 if (session_status() === PHP_SESSION_NONE) session_start();
@@ -8,6 +10,8 @@ if (session_status() === PHP_SESSION_NONE) session_start();
 // ----------------------------
 require_once __DIR__ . "/../config/db.php";
 require_once __DIR__ . "/../models/Session.php";
+require_once __DIR__ . "/../security/KeyVault.php";
+require_once __DIR__ . "/../security/ApiAuthenticator.php";
 
 // Controllers
 $controllers = [
@@ -51,8 +55,27 @@ function authenticateApiRequest(PDO $db): int {
     exit;
 }
 
+// NEW: Authenticate API key from participants (VouchMorph, Saccussalis, Zurubank)
+function authenticateParticipantRequest(PDO $db, $expectedParticipant = null) {
+    $authenticator = new Security\ApiAuthenticator();
+    
+    if ($expectedParticipant) {
+        return $authenticator->requireAuth($expectedParticipant);
+    }
+    
+    $participant = $authenticator->authenticateFromRequest();
+    if (!$participant) {
+        http_response_code(401);
+        echo json_encode(["status"=>"error","message"=>"Invalid or missing API key"]);
+        exit;
+    }
+    
+    return $participant;
+}
+
+// Check internal key (for Cazacom's internal services)
 $internalKey = $_SERVER['HTTP_X_INTERNAL_KEY'] ?? null;
-$isInternal = ($internalKey === "SACCUS_INTERNAL_KEY_2025");
+$isInternal = ($internalKey === "CAZACOM_INTERNAL_KEY_2025");
 
 // ----------------------------
 // Parse request
@@ -69,9 +92,172 @@ if (!is_array($data)) $data = [];
 // ----------------------------
 $routes = [
 
-    // ----------------------------
-    // Wallet Routes
-    // ----------------------------
+    // ============================================================
+    // HANDSHAKE ROUTES - NEW for Cazacom to connect with partners
+    // ============================================================
+    
+    // Get handshake status with all participants
+    "handshake/status" => ["GET", null, null, true, [], function($db, $userId) {
+        $keyVault = Security\Encryption\KeyVault::getInstance();
+        $participants = $keyVault->getParticipants();
+        $status = [];
+        
+        foreach ($participants as $p) {
+            $outgoingConfig = $keyVault->getUpstreamConfig($p);
+            $incomingKey = $keyVault->getIncomingKey($p);
+            
+            $status[$p] = [
+                'incoming_key_configured' => !empty($incomingKey),
+                'outgoing_key_configured' => !empty($outgoingConfig['api_key']),
+                'base_url_configured' => !empty($outgoingConfig['base_url']),
+                'header_name' => $outgoingConfig['header_name'],
+                'timeout_seconds' => $outgoingConfig['timeout']
+            ];
+        }
+        
+        return [
+            "status" => "success", 
+            "participants" => $status,
+            "cazacom_api_key" => !empty(getenv('CAZACOM_API_KEY')) ? "configured" : "missing"
+        ];
+    }],
+    
+    // Test handshake with a specific participant
+    "handshake/test" => ["POST", null, null, true, ["participant"], function($db, $userId, $data) {
+        $participant = $data['participant'];
+        $keyVault = Security\Encryption\KeyVault::getInstance();
+        
+        $config = $keyVault->getUpstreamConfig($participant);
+        
+        if (!$config['base_url']) {
+            return [
+                "status" => "error",
+                "message" => "No base URL configured for {$participant}"
+            ];
+        }
+        
+        $startTime = microtime(true);
+        
+        $ch = curl_init($config['base_url'] . '/api/v1/health');
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+        curl_setopt($ch, CURLOPT_TIMEOUT, $config['timeout']);
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); // For testing
+        
+        $headers = [
+            'Content-Type: application/json',
+            'X-Source: cazacom',
+            'X-Timestamp: ' . time()
+        ];
+        
+        if ($config['api_key']) {
+            $headers[] = $config['header_name'] . ': ' . $config['api_key'];
+        }
+        
+        curl_setopt($ch, CURLOPT_HTTPHEADER, $headers);
+        
+        $response = curl_exec($ch);
+        $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        $duration = (microtime(true) - $startTime) * 1000;
+        $error = curl_error($ch);
+        curl_close($ch);
+        
+        return [
+            "status" => $httpCode >= 200 && $httpCode < 300 ? "success" : "error",
+            "participant" => $participant,
+            "http_code" => $httpCode,
+            "duration_ms" => round($duration, 2),
+            "response" => json_decode($response, true),
+            "error" => $error ?: null
+        ];
+    }],
+    
+    // Webhook receiver for VouchMorph to call Cazacom
+    "webhook/vouchmorph" => ["POST", null, null, false, [], function($db, $userId, $data) {
+        // Authenticate VouchMorph using API key
+        $authenticator = new Security\ApiAuthenticator();
+        $participant = $authenticator->requireAuth('vouchmorph');
+        
+        // Process webhook from VouchMorph
+        $action = $data['action'] ?? null;
+        
+        switch($action) {
+            case 'airtime_purchase':
+                // Process airtime purchase request
+                $phone = $data['phone'] ?? null;
+                $amount = $data['amount'] ?? null;
+                $reference = $data['reference'] ?? null;
+                
+                if (!$phone || !$amount) {
+                    return ["status" => "error", "message" => "Missing phone or amount"];
+                }
+                
+                // TODO: Integrate with Cazacom's airtime system
+                return [
+                    "status" => "success",
+                    "message" => "Airtime purchase processed",
+                    "reference" => $reference,
+                    "amount" => $amount,
+                    "phone" => $phone
+                ];
+                
+            case 'balance_inquiry':
+                $phone = $data['phone'] ?? null;
+                // TODO: Get balance from Cazacom system
+                return [
+                    "status" => "success",
+                    "balance" => 100.00,
+                    "currency" => "BWP",
+                    "phone" => $phone
+                ];
+                
+            default:
+                return ["status" => "error", "message" => "Unknown action: {$action}"];
+        }
+    }],
+    
+    // Webhook receiver for Saccussalis to call Cazacom
+    "webhook/saccussalis" => ["POST", null, null, false, [], function($db, $userId, $data) {
+        $authenticator = new Security\ApiAuthenticator();
+        $participant = $authenticator->requireAuth('saccussalis');
+        
+        // Process Saccussalis webhook
+        return [
+            "status" => "success",
+            "message" => "Webhook received from Saccussalis",
+            "data" => $data
+        ];
+    }],
+    
+    // Webhook receiver for Zurubank to call Cazacom
+    "webhook/zurubank" => ["POST", null, null, false, [], function($db, $userId, $data) {
+        $authenticator = new Security\ApiAuthenticator();
+        $participant = $authenticator->requireAuth('zurubank');
+        
+        // Process Zurubank webhook
+        return [
+            "status" => "success",
+            "message" => "Webhook received from Zurubank",
+            "data" => $data
+        ];
+    }],
+    
+    // Webhook receiver for Zurubank-SA to call Cazacom
+    "webhook/zurubank_sa" => ["POST", null, null, false, [], function($db, $userId, $data) {
+        $authenticator = new Security\ApiAuthenticator();
+        $participant = $authenticator->requireAuth('zurubank_sa');
+        
+        // Process Zurubank-SA webhook
+        return [
+            "status" => "success",
+            "message" => "Webhook received from Zurubank-SA",
+            "data" => $data
+        ];
+    }],
+
+    // ============================================================
+    // EXISTING WALLET ROUTES
+    // ============================================================
+    
     "wallet/balance" => ["GET", "WalletController", "balance", true, []],
     "wallet/deposit" => ["POST", "WalletController", "deposit", true, ["amount"]],
     "wallet/credit_to_balance" => ["POST", "WalletController", "creditToBalance", true, ["amount"]],
@@ -83,9 +269,10 @@ $routes = [
     "wallet/mobile_money_to_saccus" => ["POST", "WalletController", "mobileMoneyToSaccus", true, ["amount","receiver_user_id"]],
     "wallet/main_to_mobile_money" => ["POST", "WalletController", "mainToMobileMoney", true, ["amount","receiver_user_id"]],
 
-    // ----------------------------
-    // Mobile Money Routes
-    // ----------------------------
+    // ============================================================
+    // EXISTING MOBILE MONEY ROUTES
+    // ============================================================
+    
     "mm/balance" => ["GET", null, null, true, [], function($db, $userId){
         $stmt = $db->prepare("SELECT balance, credit_balance FROM mobile_money_accounts WHERE user_id = :uid");
         $stmt->execute(['uid' => $userId]);
@@ -192,11 +379,11 @@ $routes = [
         }
     }],
 
-    // ----------------------------
-    // SMS Routes - NOW INSIDE THE ARRAY
-    // ----------------------------
+    // ============================================================
+    // EXISTING SMS ROUTES
+    // ============================================================
+    
     "sms" => ["GET", null, null, true, [], function($db, $userId) {
-        // Get user's phone number
         $stmt = $db->prepare("SELECT phone_number FROM users WHERE id = ?");
         $stmt->execute([$userId]);
         $user = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -205,7 +392,6 @@ $routes = [
             return ["status" => "error", "message" => "User not found"];
         }
         
-        // Get records from sms table
         $stmt = $db->prepare("
             SELECT id, sender_number, target_number, message, cost, direction, created_at 
             FROM sms 
@@ -220,7 +406,6 @@ $routes = [
     }],
 
     "sms/inbox" => ["GET", null, null, true, [], function($db, $userId) {
-        // Get user's phone number
         $stmt = $db->prepare("SELECT phone_number FROM users WHERE id = ?");
         $stmt->execute([$userId]);
         $user = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -229,7 +414,6 @@ $routes = [
             return ["status" => "error", "message" => "User not found"];
         }
         
-        // Get from instant_sms_inbox
         $stmt = $db->prepare("
             SELECT id, provider, from_phone, to_phone, message, received_at, parsed_at, processed
             FROM instant_sms_inbox 
@@ -244,7 +428,6 @@ $routes = [
     }],
 
     "sms/outbox" => ["GET", null, null, true, [], function($db, $userId) {
-        // Get user's phone number
         $stmt = $db->prepare("SELECT phone_number FROM users WHERE id = ?");
         $stmt->execute([$userId]);
         $user = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -253,7 +436,6 @@ $routes = [
             return ["status" => "error", "message" => "User not found"];
         }
         
-        // Get from instant_sms_outbox
         $stmt = $db->prepare("
             SELECT id, provider, to_phone, from_phone, message, status, attempts, last_attempt_at, created_at, last_error
             FROM instant_sms_outbox 
@@ -267,23 +449,39 @@ $routes = [
         return ["status" => "success", "data" => $outbox];
     }],
 
-    // ----------------------------
-    // Instant Money
-    // ----------------------------
+    // ============================================================
+    // EXISTING INSTANT MONEY ROUTES
+    // ============================================================
+    
     "instantmoney/send" => ["POST","InstantMoneyController","sendInstantMoney",true,["recipient_phone","amount","pin"]],
     "instantmoney/redeem" => ["POST","InstantMoneyController","redeemInstantMoney",false,["token","recipient_phone"]],
     "instantmoney/history" => ["GET","InstantMoneyController","getInstantMoneyHistory",true,[]],
 
-    // ----------------------------
-    // SMS (existing)
-    // ----------------------------
+    // ============================================================
+    // EXISTING SMS SEND/HISTORY
+    // ============================================================
+    
     "sms/send" => ["POST","SmsController","sendSms",false,["recipient_number","message"]],
     "sms/history" => ["GET","SmsController","getHistory",true,[]],
 
-    // ----------------------------
-    // Call
-    // ----------------------------
+    // ============================================================
+    // EXISTING CALL ROUTES
+    // ============================================================
+    
     "call/make" => ["POST","CallController","makeCall",true,["recipient","minutes"]],
+
+    // ============================================================
+    // HEALTH CHECK for handshake testing
+    // ============================================================
+    
+    "v1/health" => ["GET", null, null, false, [], function($db, $userId, $data) {
+        return [
+            "status" => "healthy",
+            "service" => "cazacom",
+            "version" => "1.0.0",
+            "timestamp" => time()
+        ];
+    }],
 ];
 
 // ----------------------------
@@ -291,7 +489,7 @@ $routes = [
 // ----------------------------
 if (!isset($routes[$path])) {
     http_response_code(404);
-    echo json_encode(["status"=>"error","message"=>"Invalid route"]);
+    echo json_encode(["status"=>"error","message"=>"Invalid route: " . $path]);
     exit;
 }
 
@@ -308,34 +506,47 @@ if ($method !== $route[0]) {
 requireParams($route[4], $data);
 
 // Internal route check
-if (!empty($route[5]) && !$isInternal) {
+if (!empty($route[5]) && !$route[5] && !$isInternal) {
+    // Some routes might have internal flag - adjust as needed
+}
+
+// Internal route check (the 6th element is internal flag)
+if (isset($route[5]) && $route[5] === true && !$isInternal) {
     http_response_code(403);
-    echo json_encode(["status"=>"error","message"=>"Unauthorized"]);
+    echo json_encode(["status"=>"error","message"=>"Unauthorized - Internal endpoint"]);
     exit;
 }
 
-// Authenticate if required
-$userId = $route[3] ? authenticateApiRequest($db) : null;
+// Authenticate if required (3rd element is auth flag)
+$userId = null;
+if ($route[3] === true) {
+    $userId = authenticateApiRequest($db);
+}
 
 // Execute route
 try {
     if (isset($route[6]) && is_callable($route[6])) {
-        $response = $route[6]($db,$userId,$data);
+        $response = $route[6]($db, $userId, $data);
     } elseif ($route[1] && $route[2]) {
         $controllerName = $route[1];
         $methodName = $route[2];
+        
+        if (!class_exists($controllerName)) {
+            throw new Exception("Controller not found: $controllerName");
+        }
+        
         $controller = new $controllerName($db);
 
         if ($methodName === "sendInstantMoney") {
             $response = $controller->$methodName($userId, $data['recipient_phone'], $data['amount'], $data['pin']);
         } elseif ($methodName === "redeemInstantMoney") {
-            $response = $controller->$methodName($data['token'],$data['recipient_phone']);
+            $response = $controller->$methodName($data['token'], $data['recipient_phone']);
         } elseif ($methodName === "ussdTransfer") {
-            $response = $controller->$methodName($data['phone'],$data['amount'],$data['pin']);
+            $response = $controller->$methodName($data['phone'], $data['amount'], $data['pin']);
         } elseif ($methodName === "sendSms") {
-            $response = $controller->$methodName(0,$data['recipient_number'],$data['message']);
+            $response = $controller->$methodName(0, $data['recipient_number'], $data['message']);
         } else {
-            $response = $controller->$methodName($userId,$data);
+            $response = $controller->$methodName($userId, $data);
         }
     } else {
         $response = ["status"=>"error","message"=>"Invalid route configuration"];
