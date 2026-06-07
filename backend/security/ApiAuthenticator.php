@@ -1,130 +1,123 @@
 <?php
-// cazacom/security/ApiAuthenticator.php
+// security/ApiAuthenticator.php - CAZACOM VERSION
 
-namespace Cazacom\Security;
+namespace Security;
+
+require_once __DIR__ . '/KeyVault.php';
+
+use Security\Encryption\KeyVault;
 
 class ApiAuthenticator
 {
-    private $pdo;
-    private $oauthServer;
+    private $keyVault;
     
-    public function __construct($pdo)
+    public function __construct()
     {
-        $this->pdo = $pdo;
-        $this->oauthServer = new OAuth2Server($pdo);
+        $this->keyVault = KeyVault::getInstance();
     }
     
     /**
-     * Validate incoming request from VouchMorph
-     * Steps: mTLS → DPoP → Bearer Token
+     * Authenticate incoming request from a specific participant
      */
-    public function authenticate(): array
+    public function authenticate($participant, $providedKey)
     {
-        // 1. Validate mTLS certificate
-        $certInfo = $this->validateMutualTls();
-        
-        // 2. Validate DPoP proof
-        $dpop = $this->validateDpopProof();
-        
-        // 3. Validate Bearer token
-        $token = $this->validateBearerToken();
-        
-        // 4. Verify token is bound to this certificate
-        if ($token['cnf']['x5t#S256'] !== $this->getCertThumbprint($certInfo)) {
-            $this->reject('Token binding failed', 'TOKEN_BINDING_FAILED');
-        }
-        
-        return [
-            'client_id' => $token['client_id'],
-            'scopes' => $token['scope'],
-            'certificate' => $certInfo
-        ];
+        return $this->keyVault->validateIncomingKey($participant, $providedKey);
     }
     
-    private function validateMutualTls(): array
+    /**
+     * Get authenticated participant from request headers
+     * Tries to match against all known participants
+     */
+    public function authenticateFromRequest()
     {
-        $clientCert = $_SERVER['SSL_CLIENT_CERT'] ?? null;
-        if (!$clientCert) {
-            $this->reject('mTLS certificate required', 'MTLS_REQUIRED');
+        $headers = $this->getAllHeaders();
+        
+        // Check common API key header locations
+        $apiKey = null;
+        foreach (['HTTP_X_API_KEY', 'HTTP_AUTHORIZATION', 'HTTP_API_KEY'] as $header) {
+            if (isset($headers[$header])) {
+                $apiKey = $headers[$header];
+                // Remove 'Bearer ' prefix if present
+                $apiKey = preg_replace('/^Bearer\s+/i', '', $apiKey);
+                break;
+            }
         }
         
-        $certInfo = openssl_x509_parse($clientCert);
-        
-        if ($certInfo['validTo_time_t'] < time()) {
-            $this->reject('Certificate expired', 'CERT_EXPIRED');
+        if (!$apiKey) {
+            return null;
         }
         
-        // Verify client is VouchMorph
-        $allowedCn = ['vouchmorph.railway.app', 'vouchmorph.btccloud.bw'];
-        if (!in_array($certInfo['subject']['CN'] ?? '', $allowedCn)) {
-            $this->reject('Certificate not authorized', 'UNAUTHORIZED_CERT');
+        // Try to match against all participants
+        foreach ($this->keyVault->getParticipants() as $participant) {
+            if ($this->authenticate($participant, $apiKey)) {
+                return $participant;
+            }
         }
         
-        return $certInfo;
+        return null;
     }
     
-    private function validateDpopProof(): array
+    /**
+     * Require authentication for an endpoint
+     */
+    public function requireAuth($specificParticipant = null)
     {
-        $dpopHeader = $_SERVER['HTTP_DPOP'] ?? null;
-        if (!$dpopHeader) {
-            $this->reject('DPoP proof required', 'DPOP_REQUIRED');
+        if ($specificParticipant) {
+            $headers = $this->getAllHeaders();
+            $apiKey = $this->extractApiKey($headers);
+            
+            if (!$apiKey || !$this->authenticate($specificParticipant, $apiKey)) {
+                $this->sendUnauthorized("Invalid API key for {$specificParticipant}");
+            }
+            
+            return $specificParticipant;
         }
         
-        $parts = explode('.', $dpopHeader);
-        $payload = json_decode($this->base64UrlDecode($parts[1]), true);
+        $participant = $this->authenticateFromRequest();
         
-        // Validate nonce (prevent replay)
-        $nonceKey = "dpop_nonce:{$payload['nonce']}";
-        $redis = new \Redis();
-        $redis->connect(getenv('REDIS_HOST') ?: 'localhost');
-        
-        if ($redis->exists($nonceKey)) {
-            $this->reject('DPoP nonce already used', 'DPOP_REPLAY');
-        }
-        $redis->setex($nonceKey, 300, '1');
-        
-        // Validate method and URL
-        if ($payload['htm'] !== $_SERVER['REQUEST_METHOD']) {
-            $this->reject('DPoP method mismatch', 'DPOP_METHOD');
+        if (!$participant) {
+            $this->sendUnauthorized("Missing or invalid API key");
         }
         
-        $requestUrl = strtok($_SERVER['REQUEST_URI'], '?');
-        if ($payload['htu'] !== $requestUrl) {
-            $this->reject('DPoP URL mismatch', 'DPOP_URL');
-        }
-        
-        return $payload;
+        return $participant;
     }
     
-    private function validateBearerToken(): array
+    private function extractApiKey($headers)
     {
-        $authHeader = $_SERVER['HTTP_AUTHORIZATION'] ?? '';
-        if (!preg_match('/DPoP\s+(.+)$/i', $authHeader, $matches)) {
-            $this->reject('Bearer token required', 'TOKEN_REQUIRED');
+        foreach (['HTTP_X_API_KEY', 'HTTP_AUTHORIZATION', 'HTTP_API_KEY'] as $header) {
+            if (isset($headers[$header])) {
+                $key = $headers[$header];
+                return preg_replace('/^Bearer\s+/i', '', $key);
+            }
+        }
+        return null;
+    }
+    
+    private function getAllHeaders()
+    {
+        if (function_exists('getallheaders')) {
+            return getallheaders();
         }
         
-        return $this->oauthServer->validateAccessToken($matches[1]);
+        // Fallback for non-Apache servers
+        $headers = [];
+        foreach ($_SERVER as $name => $value) {
+            if (substr($name, 0, 5) == 'HTTP_') {
+                $headers[$name] = $value;
+            }
+        }
+        return $headers;
     }
     
-    private function getCertThumbprint(array $certInfo): string
+    private function sendUnauthorized($message)
     {
-        return base64_encode(hash('sha256', $certInfo['certificate'] ?? '', true));
-    }
-    
-    private function reject(string $message, string $code, int $httpCode = 401): void
-    {
-        http_response_code($httpCode);
-        header('Content-Type: application/json');
+        http_response_code(401);
+        header('WWW-Authenticate: API-Key');
         echo json_encode([
-            'error' => $code,
-            'error_description' => $message,
-            'timestamp' => date('c')
+            'error' => 'unauthorized',
+            'message' => $message,
+            'timestamp' => time()
         ]);
         exit;
-    }
-    
-    private function base64UrlDecode(string $data): string
-    {
-        return base64_decode(strtr($data, '-_', '+/'));
     }
 }
