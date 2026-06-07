@@ -7,7 +7,13 @@ require_once __DIR__ . '/../models/Sms.php';
 header('Content-Type: application/json');
 
 try {
-    $db = getDbConnection();
+    $database = new Database();
+    $db = $database->getConnection();
+    
+    if (!$db) {
+        throw new Exception('Database connection failed');
+    }
+    
     $smsModel = new Sms($db);
     
     // Test saving an SMS directly
