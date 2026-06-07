@@ -1,5 +1,5 @@
 <?php
-// security/KeyVault.php
+// security/KeyVault.php - CAZACOM VERSION
 
 namespace Security\Encryption;
 
@@ -14,8 +14,7 @@ class KeyVault
     private $db;
     private $cache = [];
     
-    // Participants
-    const PARTICIPANT_CAZACOM = 'cazacom';
+    // Participants Cazacom needs to handshake with
     const PARTICIPANT_VOUCHMORPH = 'vouchmorph';
     const PARTICIPANT_SACCUSSALIS = 'saccussalis';
     const PARTICIPANT_ZURUBANK = 'zurubank';
@@ -26,23 +25,20 @@ class KeyVault
         // Get database connection
         $this->db = getDbConnection();
         
-        // Get encryption key from Railway vault FIRST, fallback to DB
+        // Get encryption key from Railway vault
         $this->encryptionKey = getenv('ENCRYPTION_KEY');
         
         if (!$this->encryptionKey) {
             // Try to get from database
-            $this->encryptionKey = $this->getKeyFromDb('master_encryption_key');
+            $this->encryptionKey = $this->getKeyFromDb('cazacom_master_key');
             
             if (!$this->encryptionKey) {
-                // Generate and store in DB (but warn about Railway)
+                // Generate and store
                 $this->encryptionKey = bin2hex(random_bytes(32));
-                $this->storeKeyInDb('master_encryption_key', $this->encryptionKey);
+                $this->storeKeyInDb('cazacom_master_key', $this->encryptionKey);
                 error_log("WARNING: ENCRYPTION_KEY not in Railway vault. Using DB stored key.");
             }
         }
-        
-        // Load Railway env vars into vault_kv_store on first run
-        $this->syncRailwayEnvToDb();
     }
     
     public static function getInstance()
@@ -54,84 +50,14 @@ class KeyVault
     }
     
     /**
-     * Sync Railway environment variables to vault_kv_store
-     */
-    private function syncRailwayEnvToDb()
-    {
-        $railwayVars = [
-            'CAZACOM_API_KEY' => getenv('CAZACOM_API_KEY'),
-            'CAZACOM_BASE_URL' => getenv('CAZACOM_BASE_URL'),
-            'CAZACOM_API_HEADER' => getenv('CAZACOM_API_HEADER'),
-            'UPSTREAM_CAZACOM_KEY' => getenv('UPSTREAM_CAZACOM_KEY'),
-            'SACCUSSALIS_API_KEY' => getenv('SACCUSSALIS_API_KEY'),
-            'SACCUSSALIS_BASE_URL' => getenv('SACCUSSALIS_BASE_URL'),
-            'UPSTREAM_SACCUSSALIS_KEY' => getenv('UPSTREAM_SACCUSSALIS_KEY'),
-            'ZURUBANK_API_KEY' => getenv('ZURUBANK_API_KEY'),
-            'ZURUBANK_BASE_URL' => getenv('ZURUBANK_BASE_URL'),
-            'UPSTREAM_ZURUBANK_KEY' => getenv('UPSTREAM_ZURUBANK_KEY'),
-            'ZURUBANK_SA_API_KEY' => getenv('ZURUBANK_SA_API_KEY'),
-            'ZURUBANK_SA_BASE_URL' => getenv('ZURUBANK_SA_BASE_URL'),
-            'UPSTREAM_ZURUBANK_SA_KEY' => getenv('UPSTREAM_ZURUBANK_SA_KEY'),
-        ];
-        
-        foreach ($railwayVars as $key => $value) {
-            if ($value && !$this->getFromVaultStore('/railway/env', $key)) {
-                $this->storeInVaultStore('/railway/env', $key, $value);
-            }
-        }
-    }
-    
-    /**
-     * Get value from vault_kv_store
-     */
-    private function getFromVaultStore($parentPath, $key)
-    {
-        $cacheKey = $parentPath . ':' . $key;
-        if (isset($this->cache[$cacheKey])) {
-            return $this->cache[$cacheKey];
-        }
-        
-        $stmt = $this->db->prepare("
-            SELECT value FROM vault_kv_store 
-            WHERE parent_path = :parent AND key = :key
-        ");
-        $stmt->execute(['parent' => $parentPath, 'key' => $key]);
-        $result = $stmt->fetch(PDO::FETCH_ASSOC);
-        
-        if ($result && $result['value']) {
-            // Value is stored as BYTEA, decrypt if encrypted
-            $value = stream_get_contents($result['value']);
-            $this->cache[$cacheKey] = $value;
-            return $value;
-        }
-        
-        return null;
-    }
-    
-    /**
-     * Store value in vault_kv_store
-     */
-    private function storeInVaultStore($parentPath, $key, $value)
-    {
-        $stmt = $this->db->prepare("
-            INSERT INTO vault_kv_store (parent_path, path, key, value)
-            VALUES (:parent, :parent || '/' || :key, :key, :value)
-            ON CONFLICT (path, key) DO UPDATE SET value = EXCLUDED.value
-        ");
-        
-        // Store as BYTEA
-        return $stmt->execute([
-            'parent' => $parentPath,
-            'key' => $key,
-            'value' => $value
-        ]);
-    }
-    
-    /**
      * Get key from encryption_keys table
      */
     private function getKeyFromDb($keyId)
     {
+        if (isset($this->cache[$keyId])) {
+            return $this->cache[$keyId];
+        }
+        
         $stmt = $this->db->prepare("
             SELECT key_value FROM encryption_keys 
             WHERE key_id = :id AND active = true
@@ -140,8 +66,11 @@ class KeyVault
         $result = $stmt->fetch(PDO::FETCH_ASSOC);
         
         if ($result) {
-            // Decrypt if encrypted
-            return $this->decrypt($result['key_value']) ?: $result['key_value'];
+            $value = $result['key_value'];
+            // Try to decrypt if it looks encrypted
+            $decrypted = $this->decrypt($value);
+            $this->cache[$keyId] = $decrypted ?: $value;
+            return $this->cache[$keyId];
         }
         
         return null;
@@ -152,35 +81,33 @@ class KeyVault
      */
     private function storeKeyInDb($keyId, $keyValue)
     {
-        // Encrypt before storing
         $encrypted = $this->encrypt($keyValue);
         
         $stmt = $this->db->prepare("
             INSERT INTO encryption_keys (key_id, key_value, active, created_at)
             VALUES (:id, :value, true, NOW())
-            ON CONFLICT (key_id) WHERE active = true 
-            DO UPDATE SET key_value = EXCLUDED.key_value
+            ON CONFLICT (key_id, key_value) DO NOTHING
         ");
         
-        return $stmt->execute(['id' => $keyId, 'value' => $encrypted ?: $keyValue]);
+        return $stmt->execute([
+            'id' => $keyId,
+            'value' => $encrypted ?: $keyValue
+        ]);
     }
     
     /**
-     * Get API key for authenticating incoming requests
-     * Priority: Railway Env > vault_kv_store > encryption_keys
+     * Get API key for authenticating incoming requests from a participant
+     * (What VouchMorph/Saccussalis/Zurubank sends TO Cazacom)
      */
     public function getIncomingKey($participant)
     {
+        // First check Railway vault
         $envKey = getenv(strtoupper($participant) . '_API_KEY');
         if ($envKey) {
             return $envKey;
         }
         
-        $vaultKey = $this->getFromVaultStore('/api_keys/incoming', $participant);
-        if ($vaultKey) {
-            return $vaultKey;
-        }
-        
+        // Then check database
         $dbKey = $this->getKeyFromDb('incoming_' . $participant);
         if ($dbKey) {
             return $dbKey;
@@ -191,7 +118,7 @@ class KeyVault
     }
     
     /**
-     * Validate incoming API key
+     * Validate an incoming API key from a participant
      */
     public function validateIncomingKey($participant, $providedKey)
     {
@@ -205,44 +132,64 @@ class KeyVault
     }
     
     /**
-     * Get upstream config for calling a participant
+     * Get API key for OUTGOING requests (Cazacom → Participant)
+     * (What Cazacom sends TO VouchMorph/Saccussalis/Zurubank)
+     */
+    public function getOutgoingKey($participant)
+    {
+        // First check Railway vault
+        $envKey = getenv('UPSTREAM_' . strtoupper($participant) . '_KEY');
+        if ($envKey) {
+            return $envKey;
+        }
+        
+        // Then check database
+        $dbKey = $this->getKeyFromDb('outgoing_' . $participant);
+        if ($dbKey) {
+            return $dbKey;
+        }
+        
+        error_log("Missing outgoing API key for participant: {$participant}");
+        return null;
+    }
+    
+    /**
+     * Get upstream configuration for calling a participant
      */
     public function getUpstreamConfig($participant)
     {
         $baseUrl = getenv(strtoupper($participant) . '_BASE_URL');
-        $apiKey = getenv('UPSTREAM_' . strtoupper($participant) . '_KEY');
+        $apiKey = $this->getOutgoingKey($participant);
         $header = getenv(strtoupper($participant) . '_API_HEADER');
+        $timeout = (int)(getenv(strtoupper($participant) . '_TIMEOUT') ?: 10);
         
-        if (!$baseUrl) {
-            $baseUrl = $this->getFromVaultStore('/upstream/configs', $participant . '_base_url');
-        }
-        if (!$apiKey) {
-            $apiKey = $this->getFromVaultStore('/upstream/configs', $participant . '_api_key');
-        }
-        if (!$header) {
-            $header = $this->getFromVaultStore('/upstream/configs', $participant . '_header') ?: 'X-API-Key';
-        }
+        // Default headers by participant
+        $defaultHeaders = [
+            'vouchmorph' => 'X-API-Key',
+            'saccussalis' => 'Authorization',
+            'zurubank' => 'X-API-Key',
+            'zurubank_sa' => 'X-API-Key',
+        ];
         
         return [
             'api_key' => $apiKey,
-            'header_name' => $header,
+            'header_name' => $header ?: ($defaultHeaders[$participant] ?? 'X-API-Key'),
             'base_url' => $baseUrl,
-            'rate_limit' => $this->getRateLimit($participant),
+            'timeout' => $timeout,
         ];
     }
     
     /**
-     * Get rate limit for participant
+     * Get all configured participants
      */
-    public function getRateLimit($participant)
+    public function getParticipants()
     {
-        $rateLimit = getenv(strtoupper($participant) . '_RATE_LIMIT');
-        if ($rateLimit) {
-            return (int)$rateLimit;
-        }
-        
-        $rateLimit = $this->getFromVaultStore('/rate_limits', $participant);
-        return $rateLimit ? (int)$rateLimit : 500;
+        return [
+            self::PARTICIPANT_VOUCHMORPH,
+            self::PARTICIPANT_SACCUSSALIS,
+            self::PARTICIPANT_ZURUBANK,
+            self::PARTICIPANT_ZURUBANK_SA,
+        ];
     }
     
     /**
@@ -269,17 +216,19 @@ class KeyVault
         }
         
         $data = base64_decode($encryptedData);
-        if (strlen($data) < 16) {
+        if ($data === false || strlen($data) < 16) {
             return $encryptedData; // Not encrypted
         }
         
         $iv = substr($data, 0, 16);
         $encrypted = substr($data, 16);
-        return openssl_decrypt($encrypted, 'AES-256-CBC', $this->encryptionKey, 0, $iv);
+        $decrypted = openssl_decrypt($encrypted, 'AES-256-CBC', $this->encryptionKey, 0, $iv);
+        
+        return $decrypted ?: $encryptedData;
     }
     
     /**
-     * Rotate key in encryption_keys table
+     * Rotate a key
      */
     public function rotateKey($keyId)
     {
@@ -305,8 +254,6 @@ class KeyVault
             $stmt->execute(['id' => $keyId, 'value' => $encrypted ?: $newKey]);
             
             $this->db->commit();
-            
-            // Clear cache
             unset($this->cache[$keyId]);
             
             return $newKey;
