@@ -93,7 +93,23 @@ if (!is_array($data)) $data = [];
 $routes = [
 
     // ============================================================
-    // HANDSHAKE ROUTES - NEW for Cazacom to connect with partners
+    // TEST ROUTE - Check environment variables
+    // ============================================================
+    
+    "test/env" => ["GET", null, null, false, [], function($db, $userId, $data) {
+        return [
+            "status" => "success",
+            "cazacom_api_key_configured" => !empty(getenv('CAZACOM_API_KEY')),
+            "cazacom_api_key_prefix" => getenv('CAZACOM_API_KEY') ? substr(getenv('CAZACOM_API_KEY'), 0, 10) . '...' : null,
+            "railway_env" => getenv('RAILWAY_ENVIRONMENT') ?: 'not_set',
+            "all_vars" => array_keys(array_filter($_SERVER, function($key) {
+                return strpos($key, 'CAZACOM') !== false || strpos($key, 'RAILWAY') !== false;
+            }, ARRAY_FILTER_USE_KEY))
+        ];
+    }],
+
+    // ============================================================
+    // HANDSHAKE ROUTES - for Cazacom to connect with partners
     // ============================================================
     
     // Get handshake status with all participants
@@ -141,7 +157,7 @@ $routes = [
         $ch = curl_init($config['base_url'] . '/api/v1/health');
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_TIMEOUT, $config['timeout']);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false); // For testing
+        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
         
         $headers = [
             'Content-Type: application/json',
@@ -173,16 +189,13 @@ $routes = [
     
     // Webhook receiver for VouchMorph to call Cazacom
     "webhook/vouchmorph" => ["POST", null, null, false, [], function($db, $userId, $data) {
-        // Authenticate VouchMorph using API key
         $authenticator = new Security\ApiAuthenticator();
         $participant = $authenticator->requireAuth('vouchmorph');
         
-        // Process webhook from VouchMorph
         $action = $data['action'] ?? null;
         
         switch($action) {
             case 'airtime_purchase':
-                // Process airtime purchase request
                 $phone = $data['phone'] ?? null;
                 $amount = $data['amount'] ?? null;
                 $reference = $data['reference'] ?? null;
@@ -191,7 +204,6 @@ $routes = [
                     return ["status" => "error", "message" => "Missing phone or amount"];
                 }
                 
-                // TODO: Integrate with Cazacom's airtime system
                 return [
                     "status" => "success",
                     "message" => "Airtime purchase processed",
@@ -202,7 +214,6 @@ $routes = [
                 
             case 'balance_inquiry':
                 $phone = $data['phone'] ?? null;
-                // TODO: Get balance from Cazacom system
                 return [
                     "status" => "success",
                     "balance" => 100.00,
@@ -220,7 +231,6 @@ $routes = [
         $authenticator = new Security\ApiAuthenticator();
         $participant = $authenticator->requireAuth('saccussalis');
         
-        // Process Saccussalis webhook
         return [
             "status" => "success",
             "message" => "Webhook received from Saccussalis",
@@ -233,7 +243,6 @@ $routes = [
         $authenticator = new Security\ApiAuthenticator();
         $participant = $authenticator->requireAuth('zurubank');
         
-        // Process Zurubank webhook
         return [
             "status" => "success",
             "message" => "Webhook received from Zurubank",
@@ -246,7 +255,6 @@ $routes = [
         $authenticator = new Security\ApiAuthenticator();
         $participant = $authenticator->requireAuth('zurubank_sa');
         
-        // Process Zurubank-SA webhook
         return [
             "status" => "success",
             "message" => "Webhook received from Zurubank-SA",
@@ -505,11 +513,6 @@ if ($method !== $route[0]) {
 // Parameters check
 requireParams($route[4], $data);
 
-// Internal route check
-if (!empty($route[5]) && !$route[5] && !$isInternal) {
-    // Some routes might have internal flag - adjust as needed
-}
-
 // Internal route check (the 6th element is internal flag)
 if (isset($route[5]) && $route[5] === true && !$isInternal) {
     http_response_code(403);
@@ -522,19 +525,6 @@ $userId = null;
 if ($route[3] === true) {
     $userId = authenticateApiRequest($db);
 }
-
-// Add this temporary test route
-"test/env" => ["GET", null, null, false, [], function($db, $userId, $data) {
-    return [
-        "status" => "success",
-        "cazacom_api_key_configured" => !empty(getenv('CAZACOM_API_KEY')),
-        "cazacom_api_key_prefix" => getenv('CAZACOM_API_KEY') ? substr(getenv('CAZACOM_API_KEY'), 0, 10) . '...' : null,
-        "railway_env" => getenv('RAILWAY_ENVIRONMENT') ?: 'not_set',
-        "all_vars" => array_keys(array_filter($_SERVER, function($key) {
-            return strpos($key, 'CAZACOM') !== false || strpos($key, 'RAILWAY') !== false;
-        }, ARRAY_FILTER_USE_KEY))
-    ];
-}],
 
 // Execute route
 try {
