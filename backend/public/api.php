@@ -113,7 +113,7 @@ $routes = [
     // ============================================================
     
     // Get handshake status with all participants
-    "handshake/status" => ["GET", null, null, true, [], function($db, $userId) {
+    "handshake/status" => ["GET", null, null, false, [], function($db, $userId) {
         $keyVault = Security\Encryption\KeyVault::getInstance();
         $participants = $keyVault->getParticipants();
         $status = [];
@@ -139,7 +139,7 @@ $routes = [
     }],
     
     // Test handshake with a specific participant
-    "handshake/test" => ["POST", null, null, true, ["participant"], function($db, $userId, $data) {
+    "handshake/test" => ["POST", null, null, false, ["participant"], function($db, $userId, $data) {
         $participant = $data['participant'];
         $keyVault = Security\Encryption\KeyVault::getInstance();
         
