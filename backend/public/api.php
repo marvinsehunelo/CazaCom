@@ -540,14 +540,15 @@ try {
         
         $controller = new $controllerName($db);
 
-        if ($methodName === "sendInstantMoney") {
+               if ($methodName === "sendInstantMoney") {
             $response = $controller->$methodName($userId, $data['recipient_phone'], $data['amount'], $data['pin']);
         } elseif ($methodName === "redeemInstantMoney") {
             $response = $controller->$methodName($data['token'], $data['recipient_phone']);
         } elseif ($methodName === "ussdTransfer") {
             $response = $controller->$methodName($data['phone'], $data['amount'], $data['pin']);
         } elseif ($methodName === "sendSms") {
-            $response = $controller->$sendSms(0, $data['recipient_number'], $data['message'], $userId);
+            // Fixed: recipient_number, message, userId
+            $response = $controller->$methodName($data['recipient_number'], $data['message'], $userId);
         } else {
             $response = $controller->$methodName($userId, $data);
         }
