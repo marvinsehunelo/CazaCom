@@ -187,3 +187,4 @@ public function getHistory($userId) {
 
     return ["status" => "success", "history" => $history];
 }
+}
