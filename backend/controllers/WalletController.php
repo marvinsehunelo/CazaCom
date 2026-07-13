@@ -146,26 +146,35 @@ class WalletController {
     }
 
     // ============================================================
-    // NEW: Get user transactions
+    // Get user transactions - FIXED to match your table columns
+    // Your table has: id, user_id, type, amount, status, created_at
     // ============================================================
     public function getTransactions($userId) {
         if (!$userId || $userId <= 0) {
             return ["status" => "error", "message" => "Valid user ID is required"];
         }
         
-        $stmt = $this->db->prepare("
-            SELECT id, type, amount, description, status, created_at 
-            FROM transactions 
-            WHERE user_id = :user_id 
-            ORDER BY created_at DESC 
-            LIMIT 50
-        ");
-        $stmt->execute([':user_id' => $userId]);
-        $transactions = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        
-        return [
-            "status" => "success",
-            "transactions" => $transactions
-        ];
+        try {
+            $stmt = $this->db->prepare("
+                SELECT id, type, amount, status, created_at 
+                FROM transactions 
+                WHERE user_id = :user_id 
+                ORDER BY created_at DESC 
+                LIMIT 50
+            ");
+            $stmt->execute([':user_id' => $userId]);
+            $transactions = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            
+            return [
+                "status" => "success",
+                "transactions" => $transactions
+            ];
+        } catch (Exception $e) {
+            error_log("[WalletController] Error fetching transactions: " . $e->getMessage());
+            return [
+                "status" => "error",
+                "message" => "Failed to fetch transactions: " . $e->getMessage()
+            ];
+        }
     }
 }
