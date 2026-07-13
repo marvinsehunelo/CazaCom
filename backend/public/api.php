@@ -388,7 +388,7 @@ $routes = [
     }],
 
     // ============================================================
-    // EXISTING SMS ROUTES
+    // EXISTING SMS ROUTES - FIXED to accept both + and non+ formats
     // ============================================================
     
     "sms" => ["GET", null, null, true, [], function($db, $userId) {
@@ -400,15 +400,38 @@ $routes = [
             return ["status" => "error", "message" => "User not found"];
         }
         
+        // ============================================================
+        // FIX: Search for both + and non+ formats
+        // ============================================================
+        $phone = $user['phone_number'];
+        $phoneWithPlus = (strpos($phone, '+') === 0) ? $phone : '+' . $phone;
+        $phoneWithoutPlus = ltrim($phone, '+');
+        
         $stmt = $db->prepare("
             SELECT id, sender_number, target_number, message, cost, direction, created_at 
             FROM sms 
-            WHERE user_id = ? OR sender_number = ? OR target_number = ?
+            WHERE user_id = ?
+               OR sender_number IN (:phone1, :phone2)
+               OR target_number IN (:phone1, :phone2)
             ORDER BY created_at DESC 
             LIMIT 50
         ");
-        $stmt->execute([$userId, $user['phone_number'], $user['phone_number']]);
+        $stmt->execute([
+            $userId,
+            'phone1' => $phoneWithPlus,
+            'phone2' => $phoneWithoutPlus
+        ]);
         $smsRecords = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        // Normalize phone numbers in results (always show with +)
+        foreach ($smsRecords as &$record) {
+            if (isset($record['sender_number']) && strpos($record['sender_number'], '+') !== 0) {
+                $record['sender_number'] = '+' . $record['sender_number'];
+            }
+            if (isset($record['target_number']) && strpos($record['target_number'], '+') !== 0) {
+                $record['target_number'] = '+' . $record['target_number'];
+            }
+        }
         
         return ["status" => "success", "data" => $smsRecords];
     }],
@@ -422,15 +445,35 @@ $routes = [
             return ["status" => "error", "message" => "User not found"];
         }
         
+        // ============================================================
+        // FIX: Search for both + and non+ formats
+        // ============================================================
+        $phone = $user['phone_number'];
+        $phoneWithPlus = (strpos($phone, '+') === 0) ? $phone : '+' . $phone;
+        $phoneWithoutPlus = ltrim($phone, '+');
+        
         $stmt = $db->prepare("
             SELECT id, provider, from_phone, to_phone, message, received_at, parsed_at, processed
             FROM instant_sms_inbox 
-            WHERE to_phone = ? OR from_phone = ?
+            WHERE to_phone IN (:phone1, :phone2) OR from_phone IN (:phone1, :phone2)
             ORDER BY received_at DESC 
             LIMIT 50
         ");
-        $stmt->execute([$user['phone_number'], $user['phone_number']]);
+        $stmt->execute([
+            'phone1' => $phoneWithPlus,
+            'phone2' => $phoneWithoutPlus
+        ]);
         $inbox = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        // Normalize phone numbers in results
+        foreach ($inbox as &$record) {
+            if (isset($record['from_phone']) && strpos($record['from_phone'], '+') !== 0) {
+                $record['from_phone'] = '+' . $record['from_phone'];
+            }
+            if (isset($record['to_phone']) && strpos($record['to_phone'], '+') !== 0) {
+                $record['to_phone'] = '+' . $record['to_phone'];
+            }
+        }
         
         return ["status" => "success", "data" => $inbox];
     }],
@@ -444,15 +487,35 @@ $routes = [
             return ["status" => "error", "message" => "User not found"];
         }
         
+        // ============================================================
+        // FIX: Search for both + and non+ formats
+        // ============================================================
+        $phone = $user['phone_number'];
+        $phoneWithPlus = (strpos($phone, '+') === 0) ? $phone : '+' . $phone;
+        $phoneWithoutPlus = ltrim($phone, '+');
+        
         $stmt = $db->prepare("
             SELECT id, provider, to_phone, from_phone, message, status, attempts, last_attempt_at, created_at, last_error
             FROM instant_sms_outbox 
-            WHERE to_phone = ? OR from_phone = ?
+            WHERE to_phone IN (:phone1, :phone2) OR from_phone IN (:phone1, :phone2)
             ORDER BY created_at DESC 
             LIMIT 50
         ");
-        $stmt->execute([$user['phone_number'], $user['phone_number']]);
+        $stmt->execute([
+            'phone1' => $phoneWithPlus,
+            'phone2' => $phoneWithoutPlus
+        ]);
         $outbox = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        // Normalize phone numbers in results
+        foreach ($outbox as &$record) {
+            if (isset($record['from_phone']) && strpos($record['from_phone'], '+') !== 0) {
+                $record['from_phone'] = '+' . $record['from_phone'];
+            }
+            if (isset($record['to_phone']) && strpos($record['to_phone'], '+') !== 0) {
+                $record['to_phone'] = '+' . $record['to_phone'];
+            }
+        }
         
         return ["status" => "success", "data" => $outbox];
     }],
