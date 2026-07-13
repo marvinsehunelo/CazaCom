@@ -542,6 +542,12 @@ $routes = [
     "call/make" => ["POST","CallController","makeCall",true,["recipient","minutes"]],
 
     // ============================================================
+    // TRANSACTIONS ROUTE - NEW
+    // ============================================================
+    
+    "transactions" => ["GET", "WalletController", "getTransactions", true, []],
+
+    // ============================================================
     // HEALTH CHECK for handshake testing
     // ============================================================
     
