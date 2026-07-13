@@ -9,7 +9,41 @@ class Sms {
     }
 
     /**
-     * Save an SMS record
+     * Normalize phone number to ensure it has + prefix
+     * @param string $phone - The phone number to normalize
+     * @return string - Normalized phone number with + prefix
+     */
+    private function normalizePhoneNumber($phone): string {
+        if (empty($phone)) {
+            return $phone;
+        }
+        
+        // Remove any spaces, dashes, parentheses
+        $phone = preg_replace('/[^0-9+]/', '', trim($phone));
+        
+        // If it starts with 00, replace with +
+        if (strpos($phone, '00') === 0) {
+            $phone = '+' . substr($phone, 2);
+        }
+        
+        // If it doesn't start with + and doesn't start with 0 (local format)
+        if (strpos($phone, '+') !== 0 && strpos($phone, '0') !== 0) {
+            // Assume it's a local number without country code - add +267 for Botswana
+            if (strlen($phone) === 8 && is_numeric($phone)) {
+                $phone = '+267' . $phone;
+            }
+        }
+        
+        // If it starts with 0 (local format), convert to +267
+        if (strpos($phone, '0') === 0 && strlen($phone) === 9) {
+            $phone = '+267' . substr($phone, 1);
+        }
+        
+        return $phone;
+    }
+
+    /**
+     * Save an SMS record - FIXED with phone number normalization
      * @param int|null $user_id - User ID (can be null for system)
      * @param string $sender_number - Sender's phone number  
      * @param string $target_number - Recipient's phone number
@@ -22,6 +56,12 @@ class Sms {
         if (empty($user_id) || $user_id === 0) {
             $user_id = null;
         }
+        
+        // ============================================================
+        // FIX: Normalize phone numbers to ensure + prefix
+        // ============================================================
+        $sender_number = $this->normalizePhoneNumber($sender_number);
+        $target_number = $this->normalizePhoneNumber($target_number);
         
         $stmt = $this->db->prepare("
             INSERT INTO sms (user_id, sender_number, target_number, message, cost, direction, created_at)
@@ -39,9 +79,13 @@ class Sms {
     }
 
     /**
-     * Fetch full SMS history (sent + received)
+     * Fetch full SMS history (sent + received) - FIXED with normalization
      */
     public function getHistory($phone_number) {
+        // Normalize the search phone number
+        $phone_number = $this->normalizePhoneNumber($phone_number);
+        
+        // Try with normalized number first
         $stmt = $this->db->prepare("
             SELECT 
                 id,
@@ -57,6 +101,43 @@ class Sms {
             LIMIT 100
         ");
         $stmt->execute(['phone' => $phone_number]);
-        return $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        // If no results, try without the + prefix (for legacy data)
+        if (empty($results)) {
+            $phoneWithoutPlus = ltrim($phone_number, '+');
+            $stmt = $this->db->prepare("
+                SELECT 
+                    id,
+                    sender_number,
+                    target_number,
+                    message,
+                    cost,
+                    direction,
+                    created_at
+                FROM sms
+                WHERE sender_number = :phone1 OR target_number = :phone1
+                   OR sender_number = :phone2 OR target_number = :phone2
+                ORDER BY created_at DESC
+                LIMIT 100
+            ");
+            $stmt->execute([
+                'phone1' => $phone_number,
+                'phone2' => $phoneWithoutPlus
+            ]);
+            $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        }
+        
+        // Normalize phone numbers in results
+        foreach ($results as &$record) {
+            if (isset($record['sender_number'])) {
+                $record['sender_number'] = $this->normalizePhoneNumber($record['sender_number']);
+            }
+            if (isset($record['target_number'])) {
+                $record['target_number'] = $this->normalizePhoneNumber($record['target_number']);
+            }
+        }
+        
+        return $results;
     }
 }
