@@ -68,7 +68,7 @@ class SmsController {
             $stmt->execute([$userId]);
             $user = $stmt->fetch(PDO::FETCH_ASSOC);
             if ($user) {
-                $senderNumber = $user['phone_number'];
+                $senderNumber = $this->normalizePhoneNumber($user['phone_number']);
                 $senderUserId = $user['id'];
             }
         }
@@ -83,38 +83,42 @@ class SmsController {
         }
 
         // Save "sent" record for sender
-        // ORDER: user_id, sender_number, target_number, message, cost, direction
         $this->smsModel->saveSms(
-            $senderUserId,      // user_id (null for system)
-            $senderNumber,      // sender_number
-            $recipientNumber,   // target_number (normalized with +)
-            $message,           // message
-            0,                  // cost
-            'sent'              // direction
+            $senderUserId,
+            $senderNumber,
+            $recipientNumber,
+            $message,
+            0,
+            'sent'
         );
 
-        // Find recipient user (if exists) - use normalized number
-        $stmt = $this->db->prepare("SELECT id, phone_number FROM users WHERE phone_number = ?");
-        $stmt->execute([$recipientNumber]);
+        // Find recipient user - try both formats
+        $recipient = null;
+        $phoneWithPlus = (strpos($recipientNumber, '+') === 0) ? $recipientNumber : '+' . $recipientNumber;
+        $phoneWithoutPlus = ltrim($recipientNumber, '+');
+        
+        $stmt = $this->db->prepare("
+            SELECT id, phone_number 
+            FROM users 
+            WHERE phone_number IN (:phone1, :phone2)
+               OR phone_number = :phone3
+        ");
+        $stmt->execute([
+            'phone1' => $phoneWithPlus,
+            'phone2' => $phoneWithoutPlus,
+            'phone3' => $recipientNumber
+        ]);
         $recipient = $stmt->fetch(PDO::FETCH_ASSOC);
-
-        // If not found, try without the + prefix (for legacy data)
-        if (!$recipient) {
-            $phoneWithoutPlus = ltrim($recipientNumber, '+');
-            $stmt = $this->db->prepare("SELECT id, phone_number FROM users WHERE phone_number = ? OR phone_number = ?");
-            $stmt->execute([$phoneWithoutPlus, $recipientNumber]);
-            $recipient = $stmt->fetch(PDO::FETCH_ASSOC);
-        }
 
         // Save "received" record for recipient
         if ($recipient) {
             $this->smsModel->saveSms(
-                $recipient['id'],           // user_id
-                $senderNumber,              // sender_number
-                $recipient['phone_number'], // target_number
-                $message,                   // message
-                0,                          // cost
-                'received'                  // direction
+                $recipient['id'],
+                $senderNumber,
+                $recipient['phone_number'],
+                $message,
+                0,
+                'received'
             );
         }
 
@@ -127,64 +131,57 @@ class SmsController {
     }
 
     /**
-     * Fetch SMS history for a user - FIXED to normalize phone numbers in response
+     * Fetch SMS history for a user - FIXED to accept both + and non+ formats
      */
-    /**
- * Fetch SMS history for a user - FIXED to accept both + and non+ formats
- */
-public function getHistory($userId) {
-    if (!$userId || $userId <= 0) {
-        return ["status" => "error", "message" => "Valid user ID is required"];
-    }
-    
-    $stmt = $this->db->prepare("SELECT phone_number FROM users WHERE id = ?");
-    $stmt->execute([$userId]);
-    $user = $stmt->fetch(PDO::FETCH_ASSOC);
-
-    if (!$user) {
-        return ["status" => "error", "message" => "User not found"];
-    }
-
-    $phone = $user['phone_number'];
-    
-    // ============================================================
-    // FIX: Search for both + and non+ formats
-    // ============================================================
-    $phoneWithPlus = (strpos($phone, '+') === 0) ? $phone : '+' . $phone;
-    $phoneWithoutPlus = ltrim($phone, '+');
-    
-    $stmt = $this->db->prepare("
-        SELECT 
-            id,
-            sender_number,
-            target_number,
-            message,
-            cost,
-            direction,
-            created_at
-        FROM sms
-        WHERE sender_number IN (:phone1, :phone2) 
-           OR target_number IN (:phone1, :phone2)
-        ORDER BY created_at DESC
-        LIMIT 100
-    ");
-    $stmt->execute([
-        'phone1' => $phoneWithPlus,
-        'phone2' => $phoneWithoutPlus
-    ]);
-    
-    $history = $stmt->fetchAll(PDO::FETCH_ASSOC);
-
-    // Normalize phone numbers in response (always show with +)
-    foreach ($history as &$record) {
-        if (isset($record['sender_number']) && strpos($record['sender_number'], '+') !== 0) {
-            $record['sender_number'] = '+' . $record['sender_number'];
+    public function getHistory($userId) {
+        if (!$userId || $userId <= 0) {
+            return ["status" => "error", "message" => "Valid user ID is required"];
         }
-        if (isset($record['target_number']) && strpos($record['target_number'], '+') !== 0) {
-            $record['target_number'] = '+' . $record['target_number'];
-        }
-    }
+        
+        $stmt = $this->db->prepare("SELECT phone_number FROM users WHERE id = ?");
+        $stmt->execute([$userId]);
+        $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
-    return ["status" => "success", "history" => $history];
-}
+        if (!$user) {
+            return ["status" => "error", "message" => "User not found"];
+        }
+
+        $phone = $user['phone_number'];
+        $phoneWithPlus = (strpos($phone, '+') === 0) ? $phone : '+' . $phone;
+        $phoneWithoutPlus = ltrim($phone, '+');
+        
+        $stmt = $this->db->prepare("
+            SELECT 
+                id,
+                sender_number,
+                target_number,
+                message,
+                cost,
+                direction,
+                created_at
+            FROM sms
+            WHERE sender_number IN (:phone1, :phone2) 
+               OR target_number IN (:phone1, :phone2)
+            ORDER BY created_at DESC
+            LIMIT 100
+        ");
+        $stmt->execute([
+            'phone1' => $phoneWithPlus,
+            'phone2' => $phoneWithoutPlus
+        ]);
+        
+        $history = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+        // Normalize phone numbers in response (always show with +)
+        foreach ($history as &$record) {
+            if (isset($record['sender_number']) && strpos($record['sender_number'], '+') !== 0) {
+                $record['sender_number'] = '+' . $record['sender_number'];
+            }
+            if (isset($record['target_number']) && strpos($record['target_number'], '+') !== 0) {
+                $record['target_number'] = '+' . $record['target_number'];
+            }
+        }
+
+        return ["status" => "success", "history" => $history];
+    }
 }
