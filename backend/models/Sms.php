@@ -81,63 +81,47 @@ class Sms {
     /**
      * Fetch full SMS history (sent + received) - FIXED with normalization
      */
-    public function getHistory($phone_number) {
-        // Normalize the search phone number
-        $phone_number = $this->normalizePhoneNumber($phone_number);
-        
-        // Try with normalized number first
-        $stmt = $this->db->prepare("
-            SELECT 
-                id,
-                sender_number,
-                target_number,
-                message,
-                cost,
-                direction,
-                created_at
-            FROM sms
-            WHERE sender_number = :phone OR target_number = :phone
-            ORDER BY created_at DESC
-            LIMIT 100
-        ");
-        $stmt->execute(['phone' => $phone_number]);
-        $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
-        
-        // If no results, try without the + prefix (for legacy data)
-        if (empty($results)) {
-            $phoneWithoutPlus = ltrim($phone_number, '+');
-            $stmt = $this->db->prepare("
-                SELECT 
-                    id,
-                    sender_number,
-                    target_number,
-                    message,
-                    cost,
-                    direction,
-                    created_at
-                FROM sms
-                WHERE sender_number = :phone1 OR target_number = :phone1
-                   OR sender_number = :phone2 OR target_number = :phone2
-                ORDER BY created_at DESC
-                LIMIT 100
-            ");
-            $stmt->execute([
-                'phone1' => $phone_number,
-                'phone2' => $phoneWithoutPlus
-            ]);
-            $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
+  /**
+ * Fetch full SMS history (sent + received) - FIXED to accept both formats
+ */
+public function getHistory($phone_number) {
+    // ============================================================
+    // FIX: Search for both + and non+ formats
+    // ============================================================
+    $phoneWithPlus = (strpos($phone_number, '+') === 0) ? $phone_number : '+' . $phone_number;
+    $phoneWithoutPlus = ltrim($phone_number, '+');
+    
+    $stmt = $this->db->prepare("
+        SELECT 
+            id,
+            sender_number,
+            target_number,
+            message,
+            cost,
+            direction,
+            created_at
+        FROM sms
+        WHERE sender_number IN (:phone1, :phone2) 
+           OR target_number IN (:phone1, :phone2)
+        ORDER BY created_at DESC
+        LIMIT 100
+    ");
+    $stmt->execute([
+        'phone1' => $phoneWithPlus,
+        'phone2' => $phoneWithoutPlus
+    ]);
+    $results = $stmt->fetchAll(PDO::FETCH_ASSOC);
+    
+    // Normalize phone numbers in results (always show with +)
+    foreach ($results as &$record) {
+        if (isset($record['sender_number']) && strpos($record['sender_number'], '+') !== 0) {
+            $record['sender_number'] = '+' . $record['sender_number'];
         }
-        
-        // Normalize phone numbers in results
-        foreach ($results as &$record) {
-            if (isset($record['sender_number'])) {
-                $record['sender_number'] = $this->normalizePhoneNumber($record['sender_number']);
-            }
-            if (isset($record['target_number'])) {
-                $record['target_number'] = $this->normalizePhoneNumber($record['target_number']);
-            }
+        if (isset($record['target_number']) && strpos($record['target_number'], '+') !== 0) {
+            $record['target_number'] = '+' . $record['target_number'];
         }
-        
-        return $results;
     }
+    
+    return $results;
+}
 }
