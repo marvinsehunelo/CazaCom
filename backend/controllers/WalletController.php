@@ -1,4 +1,6 @@
 <?php
+// controllers/WalletController.php
+
 require_once __DIR__ . "/../models/Wallet.php";
 require_once __DIR__ . "/../models/User.php";
 require_once __DIR__ . "/SmsController.php";
@@ -141,5 +143,29 @@ class WalletController {
         $this->smsController->sendSms(0, $phone, "You transferred P$amount via USSD");
 
         return ["status"=>"success","message"=>"USSD transfer completed","balance"=>$newBalance,"credit_balance"=>$newCredit];
+    }
+
+    // ============================================================
+    // NEW: Get user transactions
+    // ============================================================
+    public function getTransactions($userId) {
+        if (!$userId || $userId <= 0) {
+            return ["status" => "error", "message" => "Valid user ID is required"];
+        }
+        
+        $stmt = $this->db->prepare("
+            SELECT id, type, amount, description, status, created_at 
+            FROM transactions 
+            WHERE user_id = :user_id 
+            ORDER BY created_at DESC 
+            LIMIT 50
+        ");
+        $stmt->execute([':user_id' => $userId]);
+        $transactions = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        
+        return [
+            "status" => "success",
+            "transactions" => $transactions
+        ];
     }
 }
