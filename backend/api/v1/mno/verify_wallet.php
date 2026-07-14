@@ -2,25 +2,98 @@
 /**
  * /Backend/api/v1/mno/verify_wallet.php
  * CAZACOM - Verify wallet balance and ownership
- * Supports both API Key (for VouchMorph) and Session (for Web)
+ * Simple API Key authentication for VouchMorph
  */
 
 header("Content-Type: application/json; charset=utf-8");
 
 require_once __DIR__ . '/../../../config/db.php';
-require_once __DIR__ . '/../../../security/ApiAuthenticator.php';
-
-use Cazacom\Security\ApiAuthenticator;
 
 error_log("=== CAZACOM verify_wallet.php CALLED ===");
 error_log("Headers: " . json_encode(getallheaders()));
+error_log("Request Method: " . $_SERVER['REQUEST_METHOD']);
 
 // ============================================
-// 1. DATABASE CONNECTION
+// 1. CHECK API KEY (Simple & Direct)
+// ============================================
+$apiKey = $_SERVER['HTTP_X_API_KEY'] ?? $_SERVER['HTTP_X_APIKEY'] ?? null;
+error_log("API Key received: " . ($apiKey ? substr($apiKey, 0, 20) . '...' : 'NONE'));
+
+// Define valid API keys (hardcoded for reliability)
+$validApiKeys = [
+    'vouchmorph_live_1aB2cD3eF4gH5iJ6' => 'VOUCHMORPH',
+    'cazacom_internal_key' => 'CAZACOM_INTERNAL',
+    'test_api_key_123' => 'TEST'
+];
+
+// Check environment variable as well
+$envApiKey = getenv('CAZACOM_API_KEY');
+
+// Validate API Key
+$isValidApiKey = false;
+$clientName = 'Unknown';
+
+if ($apiKey) {
+    // Check hardcoded keys
+    if (isset($validApiKeys[$apiKey])) {
+        $isValidApiKey = true;
+        $clientName = $validApiKeys[$apiKey];
+        error_log("API Key validated from hardcoded list: $clientName");
+    }
+    // Check environment variable
+    elseif ($envApiKey && $apiKey === $envApiKey) {
+        $isValidApiKey = true;
+        $clientName = 'ENV_CLIENT';
+        error_log("API Key validated from environment variable");
+    }
+    // Check database
+    else {
+        try {
+            if (!isset($pdo)) {
+                $pdo = new PDO(getenv('DATABASE_URL'));
+                $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+            }
+            
+            $stmt = $pdo->prepare("
+                SELECT client_name, is_active 
+                FROM api_clients 
+                WHERE api_key = :api_key AND is_active = true
+            ");
+            $stmt->execute(['api_key' => $apiKey]);
+            $client = $stmt->fetch(PDO::FETCH_ASSOC);
+            
+            if ($client) {
+                $isValidApiKey = true;
+                $clientName = $client['client_name'];
+                error_log("API Key validated from database: $clientName");
+            }
+        } catch (Exception $e) {
+            error_log("Database API key check failed: " . $e->getMessage());
+        }
+    }
+}
+
+// If API key is invalid, return 401 (don't redirect)
+if (!$isValidApiKey) {
+    error_log("Invalid or missing API Key");
+    http_response_code(401);
+    echo json_encode([
+        "success" => false,
+        "verified" => false,
+        "message" => "Invalid or missing API Key. Please provide a valid X-API-Key header."
+    ]);
+    exit;
+}
+
+// ============================================
+// 2. DATABASE CONNECTION
 // ============================================
 try {
-    $pdo = new PDO(getenv('DATABASE_URL'));
-    $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    if (!isset($pdo)) {
+        $pdo = new PDO(getenv('DATABASE_URL'));
+        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    }
+    error_log("Database connected successfully");
 } catch (Exception $e) {
     error_log("Database connection failed: " . $e->getMessage());
     http_response_code(500);
@@ -33,107 +106,10 @@ try {
 }
 
 // ============================================
-// 2. CHECK AUTHENTICATION METHOD
-// ============================================
-$apiKey = $_SERVER['HTTP_X_API_KEY'] ?? $_SERVER['HTTP_X_APIKEY'] ?? null;
-$isApiKeyRequest = !empty($apiKey);
-
-error_log("API Key present: " . ($isApiKeyRequest ? 'YES (length: ' . strlen($apiKey) . ')' : 'NO'));
-
-if ($isApiKeyRequest) {
-    // ============================================
-    // API KEY AUTHENTICATION (VouchMorph)
-    // ============================================
-    error_log("Authenticating with API Key: " . substr($apiKey, 0, 10) . '...');
-    
-    // Check environment variable first (for testing)
-    $envApiKey = getenv('CAZACOM_API_KEY');
-    if ($apiKey === $envApiKey) {
-        error_log("API Key matched environment variable");
-    } else {
-        // Verify API key from database
-        try {
-            $stmt = $pdo->prepare("
-                SELECT client_id, name, scopes, is_active 
-                FROM oauth_clients 
-                WHERE api_key = :api_key AND is_active = true
-            ");
-            $stmt->execute(['api_key' => $apiKey]);
-            $client = $stmt->fetch(PDO::FETCH_ASSOC);
-            
-            if (!$client) {
-                error_log("Invalid API Key - not found in database");
-                http_response_code(401);
-                echo json_encode([
-                    "success" => false,
-                    "verified" => false,
-                    "message" => "Invalid API Key"
-                ]);
-                exit;
-            }
-            
-            error_log("API Key authenticated: Client={$client['name']}");
-            
-            // Check scope
-            $scopes = is_array($client['scopes']) ? $client['scopes'] : json_decode($client['scopes'] ?? '[]', true);
-            if (!in_array('read_balance', $scopes) && !in_array('*', $scopes)) {
-                error_log("Insufficient scope: read_balance required");
-                http_response_code(403);
-                echo json_encode([
-                    "success" => false,
-                    "verified" => false,
-                    "message" => "Insufficient scope: read_balance required"
-                ]);
-                exit;
-            }
-        } catch (Exception $e) {
-            error_log("API Key DB check failed: " . $e->getMessage());
-            http_response_code(500);
-            echo json_encode([
-                "success" => false,
-                "verified" => false,
-                "message" => "Authentication service unavailable"
-            ]);
-            exit;
-        }
-    }
-} else {
-    // ============================================
-    // SESSION AUTHENTICATION (Web Users)
-    // ============================================
-    error_log("Checking session authentication");
-    session_start();
-    
-    // Check if user is logged in via session
-    if (!isset($_SESSION['user_id']) && !isset($_SESSION['user'])) {
-        error_log("No session found");
-        
-        // Check if this is an API request (accepts JSON)
-        $acceptHeader = $_SERVER['HTTP_ACCEPT'] ?? '';
-        if (strpos($acceptHeader, 'application/json') !== false) {
-            http_response_code(401);
-            echo json_encode([
-                "success" => false,
-                "verified" => false,
-                "message" => "Authentication required. Please provide API Key or login."
-            ]);
-            exit;
-        }
-        
-        // For web requests, redirect to login
-        header('Location: login.php');
-        exit();
-    }
-    
-    error_log("Session authenticated: user_id=" . ($_SESSION['user_id'] ?? 'unknown'));
-}
-
-// ============================================
 // 3. GET REQUEST DATA
 // ============================================
 $input = json_decode(file_get_contents("php://input"), true);
 if (!$input) {
-    // Try to get from POST
     $input = $_POST;
 }
 error_log("Input data: " . json_encode($input));
@@ -149,7 +125,6 @@ $phone = $input['phone'] ??
 $amount = isset($input['amount']) ? (float)$input['amount'] : 0;
 $reference = $input['reference'] ?? null;
 $pin = $input['pin'] ?? $input['wallet_pin'] ?? null;
-$assetType = $input['asset_type'] ?? $input['destination_asset_type'] ?? 'MNO-WALLET';
 
 error_log("Phone: $phone, Amount: $amount, Pin: " . ($pin ? 'provided' : 'not provided'));
 
@@ -178,10 +153,10 @@ $searchPhone = ltrim($formattedPhone, '+');
 error_log("Searching for wallet with phone: $searchPhone (formatted: $formattedPhone)");
 
 // ============================================
-// 5. GET WALLET BALANCE
+// 5. GET WALLET DATA
 // ============================================
 try {
-    // First check if user exists
+    // First check users table
     $stmt = $pdo->prepare("
         SELECT 
             u.id as user_id,
@@ -192,12 +167,8 @@ try {
             w.id as wallet_id,
             w.balance,
             w.credit_balance,
-            w.credit_limit,
             w.currency,
-            w.status as wallet_status,
-            w.pin_hash,
-            w.pin_failed_attempts,
-            w.pin_locked_until
+            w.status as wallet_status
         FROM users u
         LEFT JOIN wallets w ON u.id = w.user_id
         WHERE u.phone = :phone
@@ -206,7 +177,7 @@ try {
     $stmt->execute(['phone' => $searchPhone]);
     $wallet = $stmt->fetch(PDO::FETCH_ASSOC);
 
-    // If not found, try with formatted phone
+    // Try with formatted phone if not found
     if (!$wallet) {
         $stmt = $pdo->prepare("
             SELECT 
@@ -218,12 +189,8 @@ try {
                 w.id as wallet_id,
                 w.balance,
                 w.credit_balance,
-                w.credit_limit,
                 w.currency,
-                w.status as wallet_status,
-                w.pin_hash,
-                w.pin_failed_attempts,
-                w.pin_locked_until
+                w.status as wallet_status
             FROM users u
             LEFT JOIN wallets w ON u.id = w.user_id
             WHERE u.phone = :phone
@@ -247,7 +214,7 @@ try {
         exit;
     }
 
-    error_log("Found user: ID={$wallet['user_id']}, Name={$wallet['full_name']}, Wallet ID={$wallet['wallet_id']}");
+    error_log("Found user: ID={$wallet['user_id']}, Name={$wallet['full_name']}");
 
     // Check if wallet exists
     if (empty($wallet['wallet_id'])) {
@@ -271,89 +238,83 @@ try {
         exit;
     }
 
-    // Calculate available balance
+    // Calculate balance
     $balance = (float)($wallet['balance'] ?? 0);
     $creditBalance = (float)($wallet['credit_balance'] ?? 0);
-    $creditLimit = (float)($wallet['credit_limit'] ?? 0);
-    $availableBalance = $balance + $creditBalance + $creditLimit;
+    $availableBalance = $balance + $creditBalance;
 
     error_log("Balance: $balance, Credit Balance: $creditBalance, Available: $availableBalance");
 
     // ============================================
-    // 6. VERIFY PIN IF PROVIDED
+    // 6. VERIFY PIN (Optional)
     // ============================================
     if ($pin) {
-        error_log("PIN provided, verifying...");
-        
-        // Check if PIN is locked
-        if ($wallet['pin_locked_until'] && strtotime($wallet['pin_locked_until']) > time()) {
-            $lockTime = date('Y-m-d H:i:s', strtotime($wallet['pin_locked_until']));
-            error_log("PIN is locked until: $lockTime");
-            echo json_encode([
-                "success" => false,
-                "verified" => false,
-                "message" => "PIN is locked. Try again later.",
-                "locked_until" => $lockTime
-            ]);
-            exit;
-        }
-
-        // Check if PIN hash exists
-        if (empty($wallet['pin_hash'])) {
-            error_log("No PIN set for user: {$wallet['user_id']}");
-            echo json_encode([
-                "success" => false,
-                "verified" => false,
-                "message" => "PIN not set for this wallet"
-            ]);
-            exit;
-        }
-
-        // Verify PIN
-        if (!password_verify($pin, $wallet['pin_hash'])) {
-            // Increment failed attempts
-            $newAttempts = ($wallet['pin_failed_attempts'] ?? 0) + 1;
-            $lockUntil = null;
-            if ($newAttempts >= 3) {
-                $lockUntil = date('Y-m-d H:i:s', time() + 900); // 15 minutes
-            }
-            
-            $updateStmt = $pdo->prepare("
-                UPDATE wallets 
-                SET pin_failed_attempts = :attempts,
-                    pin_locked_until = :lock_until
-                WHERE id = :wallet_id
-            ");
-            $updateStmt->execute([
-                'attempts' => $newAttempts,
-                'lock_until' => $lockUntil,
-                'wallet_id' => $wallet['wallet_id']
-            ]);
-
-            error_log("Invalid PIN for user {$wallet['user_id']}. Attempts: $newAttempts");
-            echo json_encode([
-                "success" => false,
-                "verified" => false,
-                "message" => "Invalid PIN",
-                "attempts_remaining" => 3 - $newAttempts
-            ]);
-            exit;
-        }
-
-        // Reset failed attempts on success
-        $resetStmt = $pdo->prepare("
-            UPDATE wallets 
-            SET pin_failed_attempts = 0,
-                pin_locked_until = NULL
+        error_log("PIN verification requested");
+        // Get PIN hash from wallet
+        $pinStmt = $pdo->prepare("
+            SELECT pin_hash, pin_failed_attempts, pin_locked_until
+            FROM wallets
             WHERE id = :wallet_id
         ");
-        $resetStmt->execute(['wallet_id' => $wallet['wallet_id']]);
+        $pinStmt->execute(['wallet_id' => $wallet['wallet_id']]);
+        $pinData = $pinStmt->fetch(PDO::FETCH_ASSOC);
         
-        error_log("PIN verified successfully for user: {$wallet['user_id']}");
+        if ($pinData && !empty($pinData['pin_hash'])) {
+            // Check if PIN is locked
+            if ($pinData['pin_locked_until'] && strtotime($pinData['pin_locked_until']) > time()) {
+                echo json_encode([
+                    "success" => false,
+                    "verified" => false,
+                    "message" => "PIN is locked. Try again later."
+                ]);
+                exit;
+            }
+            
+            // Verify PIN
+            if (!password_verify($pin, $pinData['pin_hash'])) {
+                // Increment failed attempts
+                $newAttempts = ($pinData['pin_failed_attempts'] ?? 0) + 1;
+                $lockUntil = $newAttempts >= 3 ? date('Y-m-d H:i:s', time() + 900) : null;
+                
+                $updateStmt = $pdo->prepare("
+                    UPDATE wallets 
+                    SET pin_failed_attempts = :attempts,
+                        pin_locked_until = :lock_until
+                    WHERE id = :wallet_id
+                ");
+                $updateStmt->execute([
+                    'attempts' => $newAttempts,
+                    'lock_until' => $lockUntil,
+                    'wallet_id' => $wallet['wallet_id']
+                ]);
+                
+                error_log("Invalid PIN for user {$wallet['user_id']}. Attempts: $newAttempts");
+                echo json_encode([
+                    "success" => false,
+                    "verified" => false,
+                    "message" => "Invalid PIN"
+                ]);
+                exit;
+            }
+            
+            // Reset failed attempts on success
+            $resetStmt = $pdo->prepare("
+                UPDATE wallets 
+                SET pin_failed_attempts = 0,
+                    pin_locked_until = NULL
+                WHERE id = :wallet_id
+            ");
+            $resetStmt->execute(['wallet_id' => $wallet['wallet_id']]);
+            
+            error_log("PIN verified successfully");
+        } else {
+            error_log("No PIN set for wallet");
+            // Continue without PIN verification if no PIN set
+        }
     }
 
     // ============================================
-    // 7. CHECK SUFFICIENT BALANCE
+    // 7. CHECK BALANCE
     // ============================================
     if ($amount > 0 && $availableBalance < $amount) {
         error_log("Insufficient balance: Available $availableBalance, Requested $amount");
@@ -387,8 +348,7 @@ try {
             "wallet_id" => $wallet['wallet_id'],
             "wallet_status" => $wallet['wallet_status'],
             "balance" => $balance,
-            "credit_balance" => $creditBalance,
-            "credit_limit" => $creditLimit
+            "credit_balance" => $creditBalance
         ]
     ];
 
@@ -397,19 +357,14 @@ try {
 
 } catch (PDOException $e) {
     error_log("PDO Error: " . $e->getMessage());
-    error_log("Stack trace: " . $e->getTraceAsString());
-    
     http_response_code(500);
     echo json_encode([
         "success" => false,
         "verified" => false,
-        "message" => "Database error occurred",
-        "error" => $e->getMessage()
+        "message" => "Database error: " . $e->getMessage()
     ]);
 } catch (Exception $e) {
     error_log("General Error: " . $e->getMessage());
-    error_log("Stack trace: " . $e->getTraceAsString());
-    
     http_response_code(500);
     echo json_encode([
         "success" => false,
