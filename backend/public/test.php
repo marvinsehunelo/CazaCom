@@ -1,40 +1,4 @@
 <?php
-// test_sms.php - Direct SMS test
+// zurubank/Frontend/auth/openfile.php
 
-require_once __DIR__ . '/../config/db.php';
-require_once __DIR__ . '/../models/Sms.php';
-
-header('Content-Type: application/json');
-
-try {
-    $database = new Database();
-    $db = $database->getConnection();
-    
-    if (!$db) {
-        throw new Exception('Database connection failed');
-    }
-    
-    $smsModel = new Sms($db);
-    
-    // Test saving an SMS directly
-    $result = $smsModel->saveSms(
-        null,               // user_id (null for system)
-        'SYSTEM',           // sender_number
-        '+26770000000',     // target_number
-        'Test message from Cazacom',  // message
-        0,                  // cost
-        'sent'              // direction
-    );
-    
-    echo json_encode([
-        'status' => 'success',
-        'message' => 'SMS saved successfully',
-        'result' => $result
-    ]);
-    
-} catch (Exception $e) {
-    echo json_encode([
-        'status' => 'error',
-        'message' => $e->getMessage()
-    ]);
-}
+require_once __DIR__ . '/../api/v1/mno/verify_wallet.php';
