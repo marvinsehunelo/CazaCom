@@ -84,6 +84,24 @@ body {
     cursor: not-allowed;
 }
 
+.btn-action-outline {
+    background: transparent;
+    color: #00ccff;
+    font-weight: 600;
+    transition: 0.2s;
+    border: 1px solid #00ccff;
+    border-radius: 0;
+    padding: 0.75rem 1.5rem;
+}
+.btn-action-outline:hover {
+    background: rgba(0, 204, 255, 0.1);
+    box-shadow: 0 0 12px rgba(0, 204, 255, 0.5);
+}
+.btn-action-outline:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
 .input-field {
     background-color: #1a1a1a;
     border: 1px solid #333;
@@ -272,6 +290,12 @@ body {
 .message-modal-content .msg-body .sms-content .expiry {
     color: #ff6b6b;
 }
+.message-modal-content .msg-actions {
+    margin-top: 20px;
+    display: flex;
+    gap: 10px;
+    justify-content: flex-end;
+}
 
 @keyframes fadeIn {
     from { opacity: 0; transform: translateY(-5px); }
@@ -419,6 +443,27 @@ body {
             </div>
         </div>
 
+        <!-- ============ COMPOSE / SEND SMS ============ -->
+        <div class="wallet-subsection" style="border-left: 4px solid #00ccff;">
+            <h3 class="text-lg font-semibold mb-4 flex items-center">
+                <i data-lucide="send" class="w-5 h-5 mr-2 text-[#00ccff]"></i>
+                Send SMS
+            </h3>
+            <div class="grid grid-cols-1 sm:grid-cols-4 gap-3 items-start">
+                <input type="tel" id="composeRecipient" placeholder="Recipient number (e.g. 26771234567)"
+                       class="input-field p-3 text-sm sm:col-span-1" autocomplete="off">
+                <textarea id="composeMessage" placeholder="Type your message..." maxlength="480" rows="2"
+                          class="input-field p-3 text-sm sm:col-span-2" oninput="updateComposeCount()"></textarea>
+                <div class="flex flex-col gap-2 sm:col-span-1">
+                    <button id="composeSendBtn" class="btn-action py-3 text-sm w-full" onclick="sendInstantSms()">
+                        <i data-lucide="send" class="inline w-4 h-4 mr-1"></i>Send
+                    </button>
+                    <span id="composeCount" class="text-xs text-gray-500 text-right">0 / 480</span>
+                </div>
+            </div>
+            <p id="composeError" class="text-xs text-red-500 mt-2 hidden"></p>
+        </div>
+
         <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div class="wallet-subsection">
                 <h3 class="text-lg font-semibold mb-4">SMS Records</h3>
@@ -441,6 +486,7 @@ body {
 
             <div class="wallet-subsection">
                 <h3 class="text-lg font-semibold mb-4">Instant SMS Inbox</h3>
+                <p class="text-xs text-gray-500 mb-2">Click any message to read the full text and reply.</p>
                 <div class="overflow-x-auto max-h-60 overflow-y-auto">
                     <table class="w-full text-sm">
                         <thead class="bg-[#1a1a1a] text-[#00ccff] sticky top-0">
@@ -460,6 +506,7 @@ body {
 
             <div class="wallet-subsection lg:col-span-2">
                 <h3 class="text-lg font-semibold mb-4">Instant SMS Outbox</h3>
+                <p class="text-xs text-gray-500 mb-2">Click any message to read the full text.</p>
                 <div class="overflow-x-auto max-h-60 overflow-y-auto">
                     <table class="w-full text-sm">
                         <thead class="bg-[#1a1a1a] text-[#00ccff] sticky top-0">
@@ -526,6 +573,7 @@ body {
                 <div class="msg-from" id="msgFrom">From: +26770000000</div>
                 <div class="msg-time" id="msgTime">Received: 2024-01-01 12:00:00</div>
                 <div class="msg-body" id="msgBody">Message content here</div>
+                <div class="msg-actions" id="msgActions"></div>
             </div>
         </div>
     </div>
@@ -537,6 +585,13 @@ const loggedInUserPhone = <?= json_encode($loggedInUserPhone) ?>;
 const isRailway = window.location.hostname.includes('railway.app') || window.location.hostname.includes('up.railway.app');
 const basePath = '/api.php';    
 const baseApiUrl = window.location.origin + basePath;
+
+// In-memory store for the currently loaded inbox/outbox messages, so the
+// message modal can look raw data up by index instead of round-tripping
+// through an HTML-escaped, string-interpolated onclick attribute (which is
+// what broke on any message containing a quote, apostrophe, or line break).
+let _smsInboxData = [];
+let _smsOutboxData = [];
 
 async function apiCall(endpoint, params = {}, method = 'GET') {
     const url = new URL(baseApiUrl);
@@ -594,12 +649,15 @@ function closeNotificationModal() {
 }
 
 // ============ MESSAGE VIEWER ============
-function openMessageModal(from, time, message) {
+// Called with the RAW (unescaped) from/time/message strings and an optional
+// replyTo number. Escaping for display happens once, here, in the right
+// context (building innerHTML), instead of earlier when building an
+// onclick attribute — which is what was corrupting messages before.
+function openMessageModal(from, time, message, replyTo) {
     document.getElementById('msgFrom').textContent = 'From: ' + from;
     document.getElementById('msgTime').textContent = 'Received: ' + time;
-    
-    // Format the message with syntax highlighting for voucher codes
-    let formattedMsg = escapeHtml(message);
+
+    let formattedMsg = escapeHtml(message || '');
     // Highlight amounts
     formattedMsg = formattedMsg.replace(/(\d+\.?\d*)\s*(BWP|Pula|USD|EUR|GBP)/gi, '<span class="amount">$1 $2</span>');
     // Highlight voucher numbers (12 digits)
@@ -610,8 +668,20 @@ function openMessageModal(from, time, message) {
     formattedMsg = formattedMsg.replace(/\b(\d{8})\b/g, '<span class="code">$1</span>');
     // Highlight expiry dates
     formattedMsg = formattedMsg.replace(/(\d{2}\s+[A-Za-z]+\s+\d{4}\s+\d{2}:\d{2})/g, '<span class="expiry">$1</span>');
-    
+
     document.getElementById('msgBody').innerHTML = '<div class="sms-content">' + formattedMsg + '</div>';
+
+    const actionsEl = document.getElementById('msgActions');
+    actionsEl.innerHTML = '';
+    if (replyTo) {
+        const replyBtn = document.createElement('button');
+        replyBtn.className = 'btn-action-outline text-sm';
+        replyBtn.innerHTML = '<i data-lucide="reply" class="inline w-4 h-4 mr-1"></i>Reply';
+        replyBtn.addEventListener('click', () => replyToMessage(replyTo));
+        actionsEl.appendChild(replyBtn);
+        if (window.lucide) lucide.createIcons();
+    }
+
     document.getElementById('messageModal').classList.add('active');
     document.body.style.overflow = 'hidden';
 }
@@ -619,6 +689,37 @@ function openMessageModal(from, time, message) {
 function closeMessageModal() {
     document.getElementById('messageModal').classList.remove('active');
     document.body.style.overflow = '';
+}
+
+// Opens a specific inbox message by its index in _smsInboxData.
+function openInboxMessage(index) {
+    const msg = _smsInboxData[index];
+    if (!msg) return;
+    const from = msg.sender_number || 'N/A';
+    const time = msg.created_at ? new Date(msg.created_at).toLocaleString() : 'N/A';
+    openMessageModal(from, time, msg.message || '', from !== 'N/A' ? from : null);
+}
+
+// Opens a specific outbox message by its index in _smsOutboxData.
+function openOutboxMessage(index) {
+    const msg = _smsOutboxData[index];
+    if (!msg) return;
+    const to = msg.target_number || msg.recipient || 'N/A';
+    const time = msg.created_at ? new Date(msg.created_at).toLocaleString() : 'N/A';
+    openMessageModal('To: ' + to, time, msg.message || '', null);
+}
+
+// Pre-fills the compose box with a recipient, closes the modal, and
+// scrolls/focuses the message field so the user can just start typing.
+function replyToMessage(recipient) {
+    closeMessageModal();
+    const recipientEl = document.getElementById('composeRecipient');
+    const messageEl = document.getElementById('composeMessage');
+    recipientEl.value = recipient;
+    messageEl.value = '';
+    updateComposeCount();
+    recipientEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    messageEl.focus();
 }
 
 function escapeHtml(text) {
@@ -665,11 +766,11 @@ function displayMobileMoneyTransactions(transactions) {
     tbody.innerHTML = transactions.map(tx => `
         <tr class="border-b border-gray-800">
             <td class="p-2">${new Date(tx.created_at).toLocaleString()}</td>
-            <td class="p-2">${tx.type}</td>
+            <td class="p-2">${escapeHtml(tx.type || '')}</td>
             <td class="p-2 ${tx.type === 'deposit' ? 'text-[#ff9900]' : 'text-red-400'}">BWP ${parseFloat(tx.amount).toFixed(2)}</td>
             <td class="p-2">BWP ${parseFloat(tx.fee || 0).toFixed(2)}</td>
-            <td class="p-2">${tx.recipient_phone || '-'}</td>
-            <td class="p-2"><span class="px-2 py-1 text-xs ${tx.status === 'completed' ? 'bg-green-900 text-green-400' : 'bg-yellow-900 text-yellow-400'}">${tx.status}</span></td>
+            <td class="p-2">${escapeHtml(tx.recipient_phone || '-')}</td>
+            <td class="p-2"><span class="px-2 py-1 text-xs ${tx.status === 'completed' ? 'bg-green-900 text-green-400' : 'bg-yellow-900 text-yellow-400'}">${escapeHtml(tx.status || '')}</span></td>
         </tr>
     `).join('');
 }
@@ -703,27 +804,32 @@ function displaySmsRecords(smsRecords) {
     tbody.innerHTML = smsRecords.map(sms => `
         <tr class="border-b border-gray-800">
             <td class="p-2">${new Date(sms.created_at).toLocaleString()}</td>
-            <td class="p-2">${sms.target_number || sms.recipient || 'N/A'}</td>
+            <td class="p-2">${escapeHtml(sms.target_number || sms.recipient || 'N/A')}</td>
             <td class="p-2">BWP ${parseFloat(sms.cost || 0).toFixed(2)}</td>
-            <td class="p-2"><span class="px-2 py-1 text-xs ${sms.direction === 'sent' ? 'bg-blue-900 text-blue-400' : 'bg-green-900 text-green-400'}">${sms.direction}</span></td>
+            <td class="p-2"><span class="px-2 py-1 text-xs ${sms.direction === 'sent' ? 'bg-blue-900 text-blue-400' : 'bg-green-900 text-green-400'}">${escapeHtml(sms.direction || '')}</span></td>
         </tr>
     `).join('');
 }
 
+// Rows now carry a plain integer index (data-msg-index) instead of the
+// message text itself — no string-escaping-into-JS-string edge cases left.
+// A single delegated listener (wired once in DOMContentLoaded) reads the
+// index and looks the real object up in _smsInboxData / _smsOutboxData.
 function displaySmsInbox(receivedMessages) {
+    _smsInboxData = receivedMessages || [];
     const tbody = document.getElementById('instantSmsInbox');
-    if (!receivedMessages || !receivedMessages.length) {
+    if (!_smsInboxData.length) {
         tbody.innerHTML = '<tr><td colspan="4" class="text-center p-4 text-gray-500">No received messages</td></tr>';
         return;
     }
-    tbody.innerHTML = receivedMessages.map(msg => {
+    tbody.innerHTML = _smsInboxData.map((msg, i) => {
         const messageText = msg.message || '';
         const truncated = messageText.length > 50 ? messageText.substring(0, 50) + '...' : messageText;
         return `
         <tr class="border-b border-gray-800">
-            <td class="p-2">${msg.sender_number || 'N/A'}</td>
+            <td class="p-2">${escapeHtml(msg.sender_number || 'N/A')}</td>
             <td class="p-2">
-                <span class="sms-message-box" onclick="openMessageModal('${escapeHtml(msg.sender_number || 'N/A')}', '${new Date(msg.created_at).toLocaleString()}', '${escapeHtml(messageText)}')" title="Click to read full message">
+                <span class="sms-message-box" data-msg-index="${i}" data-msg-source="inbox" title="Click to read full message">
                     ${escapeHtml(truncated)}
                 </span>
             </td>
@@ -734,27 +840,102 @@ function displaySmsInbox(receivedMessages) {
 }
 
 function displaySmsOutbox(sentMessages) {
+    _smsOutboxData = sentMessages || [];
     const tbody = document.getElementById('instantSmsOutbox');
-    if (!sentMessages || !sentMessages.length) {
+    if (!_smsOutboxData.length) {
         tbody.innerHTML = '<tr><td colspan="5" class="text-center p-4 text-gray-500">No sent messages</td></tr>';
         return;
     }
-    tbody.innerHTML = sentMessages.map(msg => {
+    tbody.innerHTML = _smsOutboxData.map((msg, i) => {
         const messageText = msg.message || '';
         const truncated = messageText.length > 50 ? messageText.substring(0, 50) + '...' : messageText;
         return `
         <tr class="border-b border-gray-800">
-            <td class="p-2">${msg.target_number || msg.recipient || 'N/A'}</td>
+            <td class="p-2">${escapeHtml(msg.target_number || msg.recipient || 'N/A')}</td>
             <td class="p-2">
-                <span class="sms-message-box" onclick="openMessageModal('To: ${escapeHtml(msg.target_number || msg.recipient || 'N/A')}', '${new Date(msg.created_at).toLocaleString()}', '${escapeHtml(messageText)}')" title="Click to read full message">
+                <span class="sms-message-box" data-msg-index="${i}" data-msg-source="outbox" title="Click to read full message">
                     ${escapeHtml(truncated)}
                 </span>
             </td>
-            <td class="p-2"><span class="px-2 py-1 text-xs ${msg.status === 'delivered' ? 'bg-green-900 text-green-400' : 'bg-yellow-900 text-yellow-400'}">${msg.status || 'sent'}</span></td>
+            <td class="p-2"><span class="px-2 py-1 text-xs ${msg.status === 'delivered' ? 'bg-green-900 text-green-400' : 'bg-yellow-900 text-yellow-400'}">${escapeHtml(msg.status || 'sent')}</span></td>
             <td class="p-2">${msg.attempts || 1}</td>
             <td class="p-2">${msg.created_at ? new Date(msg.created_at).toLocaleString() : 'N/A'}</td>
         </tr>
     `}).join('');
+}
+
+// Single delegated click handler for both inbox and outbox message cells.
+// Delegation means newly rendered rows work automatically — no re-binding
+// needed after every refresh.
+document.addEventListener('click', function (e) {
+    const target = e.target.closest('.sms-message-box');
+    if (!target) return;
+    const index = parseInt(target.getAttribute('data-msg-index'), 10);
+    const source = target.getAttribute('data-msg-source');
+    if (Number.isNaN(index)) return;
+    if (source === 'inbox') openInboxMessage(index);
+    else if (source === 'outbox') openOutboxMessage(index);
+});
+
+// ============ SEND SMS ============
+function updateComposeCount() {
+    const messageEl = document.getElementById('composeMessage');
+    const countEl = document.getElementById('composeCount');
+    const len = messageEl.value.length;
+    countEl.textContent = `${len} / 480`;
+}
+
+async function sendInstantSms() {
+    const recipientEl = document.getElementById('composeRecipient');
+    const messageEl = document.getElementById('composeMessage');
+    const sendBtn = document.getElementById('composeSendBtn');
+    const errorEl = document.getElementById('composeError');
+
+    const recipient = recipientEl.value.trim();
+    const message = messageEl.value.trim();
+
+    errorEl.classList.add('hidden');
+    errorEl.textContent = '';
+
+    if (!recipient) {
+        errorEl.textContent = 'Enter a recipient number.';
+        errorEl.classList.remove('hidden');
+        recipientEl.focus();
+        return;
+    }
+    if (!message) {
+        errorEl.textContent = 'Type a message before sending.';
+        errorEl.classList.remove('hidden');
+        messageEl.focus();
+        return;
+    }
+
+    sendBtn.disabled = true;
+    const originalLabel = sendBtn.innerHTML;
+    sendBtn.innerHTML = '<span class="loading-spinner" style="border-top-color:#000;"></span>Sending...';
+
+    try {
+        // NOTE: endpoint/param names assumed as sms/send with {recipient, message}.
+        // Adjust to match whatever api.php actually expects if it differs.
+        const res = await apiCall('sms/send', { recipient: recipient, message: message }, 'POST');
+        if (res.status === 'success') {
+            recipientEl.value = '';
+            messageEl.value = '';
+            updateComposeCount();
+            showNotification('Message Sent', 'Your SMS was sent successfully.');
+            loadSmsData();
+        } else {
+            errorEl.textContent = res.message || 'Failed to send message.';
+            errorEl.classList.remove('hidden');
+        }
+    } catch (err) {
+        errorEl.textContent = 'Network error while sending. Please try again.';
+        errorEl.classList.remove('hidden');
+    } finally {
+        sendBtn.disabled = false;
+        sendBtn.innerHTML = originalLabel;
+        if (window.lucide) lucide.createIcons();
+    }
 }
 
 // ============ CALLS ============
