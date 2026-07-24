@@ -164,9 +164,115 @@ body {
     text-align: center;
 }
 
+/* SMS Message Box - Click to expand */
 .sms-message-box {
     animation: fadeIn 0.3s ease-in-out;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    max-width: 250px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
 }
+.sms-message-box:hover {
+    color: #00ccff;
+    opacity: 0.8;
+}
+.sms-message-box.expanded {
+    max-width: 500px;
+    white-space: normal;
+    word-wrap: break-word;
+    background: rgba(0, 204, 255, 0.05);
+    padding: 4px 8px;
+    border-radius: 4px;
+}
+
+/* Full message modal */
+.message-modal-overlay {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.85);
+    z-index: 9999;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    backdrop-filter: blur(4px);
+}
+.message-modal-overlay.active {
+    display: flex;
+}
+.message-modal-content {
+    background: #1a1a1a;
+    border: 1px solid #00ccff;
+    border-radius: 0;
+    max-width: 600px;
+    width: 100%;
+    max-height: 80vh;
+    overflow-y: auto;
+    padding: 30px;
+    box-shadow: 0 0 60px rgba(0, 204, 255, 0.1);
+}
+.message-modal-content .close-btn {
+    float: right;
+    background: none;
+    border: none;
+    color: #fff;
+    font-size: 28px;
+    cursor: pointer;
+    padding: 0 8px;
+    line-height: 1;
+}
+.message-modal-content .close-btn:hover {
+    color: #ff4444;
+}
+.message-modal-content .msg-from {
+    color: #00ccff;
+    font-weight: 600;
+    font-size: 14px;
+    margin-bottom: 4px;
+}
+.message-modal-content .msg-time {
+    color: #666;
+    font-size: 12px;
+    margin-bottom: 16px;
+}
+.message-modal-content .msg-body {
+    color: #f5f5f5;
+    font-size: 15px;
+    line-height: 1.8;
+    white-space: pre-wrap;
+    word-wrap: break-word;
+    background: #0f0f0f;
+    padding: 16px;
+    border: 1px solid #2a2a2a;
+    border-radius: 4px;
+}
+.message-modal-content .msg-body .sms-content {
+    font-family: 'Courier New', monospace;
+    font-size: 14px;
+    color: #e0e0e0;
+}
+.message-modal-content .msg-body .sms-content .amount {
+    color: #ff9900;
+    font-weight: 700;
+}
+.message-modal-content .msg-body .sms-content .voucher {
+    color: #00ccff;
+    font-weight: 600;
+}
+.message-modal-content .msg-body .sms-content .pin {
+    color: #ff6b6b;
+    font-weight: 700;
+}
+.message-modal-content .msg-body .sms-content .code {
+    color: #ffd93d;
+    font-weight: 700;
+}
+.message-modal-content .msg-body .sms-content .expiry {
+    color: #ff6b6b;
+}
+
 @keyframes fadeIn {
     from { opacity: 0; transform: translateY(-5px); }
     to { opacity: 1; transform: translateY(0); }
@@ -190,7 +296,7 @@ body {
         </div>
     </header>
 
-    <!-- Navigation Tabs - Mobile Money, SMS, Calls -->
+    <!-- Navigation Tabs -->
     <nav class="flex justify-center gap-1 mb-10 flex-wrap">
         <button id="nav-mobile-money" class="btn-tab px-6 py-2 text-xs sm:text-sm uppercase active" onclick="openSection('mobile-money')">💰 Mobile Money</button>
         <button id="nav-sms" class="btn-tab px-6 py-2 text-xs sm:text-sm uppercase" onclick="openSection('sms')">💬 SMS</button>
@@ -403,12 +509,24 @@ body {
         </div>
     </div>
 
-    <!-- ============ MODALS ============ -->
+    <!-- ============ NOTIFICATION MODAL ============ -->
     <div id="notificationModal" class="fixed inset-0 bg-black bg-opacity-70 hidden items-center justify-center z-50 transition-opacity duration-300">
         <div class="bg-[#1a1a1a] p-6 w-96 rounded-none border border-[#ff9900] shadow-2xl">
             <h3 id="notificationTitle" class="text-xl font-bold text-[#ff9900] mb-3 border-b border-gray-700 pb-2">Notification</h3>
             <p id="notificationMessage" class="text-gray-300 mb-4 text-sm"></p>
             <button class="btn-action w-full py-2 text-sm" onclick="closeNotificationModal()">Close</button>
+        </div>
+    </div>
+
+    <!-- ============ MESSAGE VIEWER MODAL ============ -->
+    <div id="messageModal" class="message-modal-overlay" onclick="if(event.target===this)closeMessageModal()">
+        <div class="message-modal-content">
+            <button class="close-btn" onclick="closeMessageModal()">&times;</button>
+            <div id="messageModalBody">
+                <div class="msg-from" id="msgFrom">From: +26770000000</div>
+                <div class="msg-time" id="msgTime">Received: 2024-01-01 12:00:00</div>
+                <div class="msg-body" id="msgBody">Message content here</div>
+            </div>
         </div>
     </div>
 </div>
@@ -473,6 +591,40 @@ function showNotification(title, message, isError = false) {
 function closeNotificationModal() {
     document.getElementById('notificationModal').classList.remove('flex');
     document.getElementById('notificationModal').classList.add('hidden');
+}
+
+// ============ MESSAGE VIEWER ============
+function openMessageModal(from, time, message) {
+    document.getElementById('msgFrom').textContent = 'From: ' + from;
+    document.getElementById('msgTime').textContent = 'Received: ' + time;
+    
+    // Format the message with syntax highlighting for voucher codes
+    let formattedMsg = escapeHtml(message);
+    // Highlight amounts
+    formattedMsg = formattedMsg.replace(/(\d+\.?\d*)\s*(BWP|Pula|USD|EUR|GBP)/gi, '<span class="amount">$1 $2</span>');
+    // Highlight voucher numbers (12 digits)
+    formattedMsg = formattedMsg.replace(/\b(\d{12})\b/g, '<span class="voucher">$1</span>');
+    // Highlight PINs (6 digits)
+    formattedMsg = formattedMsg.replace(/\b(\d{6})\b/g, '<span class="pin">$1</span>');
+    // Highlight auth codes (8 digits)
+    formattedMsg = formattedMsg.replace(/\b(\d{8})\b/g, '<span class="code">$1</span>');
+    // Highlight expiry dates
+    formattedMsg = formattedMsg.replace(/(\d{2}\s+[A-Za-z]+\s+\d{4}\s+\d{2}:\d{2})/g, '<span class="expiry">$1</span>');
+    
+    document.getElementById('msgBody').innerHTML = '<div class="sms-content">' + formattedMsg + '</div>';
+    document.getElementById('messageModal').classList.add('active');
+    document.body.style.overflow = 'hidden';
+}
+
+function closeMessageModal() {
+    document.getElementById('messageModal').classList.remove('active');
+    document.body.style.overflow = '';
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
 }
 
 function openSection(id) {
@@ -564,14 +716,21 @@ function displaySmsInbox(receivedMessages) {
         tbody.innerHTML = '<tr><td colspan="4" class="text-center p-4 text-gray-500">No received messages</td></tr>';
         return;
     }
-    tbody.innerHTML = receivedMessages.map(msg => `
+    tbody.innerHTML = receivedMessages.map(msg => {
+        const messageText = msg.message || '';
+        const truncated = messageText.length > 50 ? messageText.substring(0, 50) + '...' : messageText;
+        return `
         <tr class="border-b border-gray-800">
             <td class="p-2">${msg.sender_number || 'N/A'}</td>
-            <td class="p-2 max-w-xs truncate">${msg.message || ''}</td>
+            <td class="p-2">
+                <span class="sms-message-box" onclick="openMessageModal('${escapeHtml(msg.sender_number || 'N/A')}', '${new Date(msg.created_at).toLocaleString()}', '${escapeHtml(messageText)}')" title="Click to read full message">
+                    ${escapeHtml(truncated)}
+                </span>
+            </td>
             <td class="p-2">${msg.created_at ? new Date(msg.created_at).toLocaleString() : 'N/A'}</td>
             <td class="p-2">${msg.cost ? 'BWP ' + parseFloat(msg.cost).toFixed(2) : '-'}</td>
         </tr>
-    `).join('');
+    `}).join('');
 }
 
 function displaySmsOutbox(sentMessages) {
@@ -580,21 +739,36 @@ function displaySmsOutbox(sentMessages) {
         tbody.innerHTML = '<tr><td colspan="5" class="text-center p-4 text-gray-500">No sent messages</td></tr>';
         return;
     }
-    tbody.innerHTML = sentMessages.map(msg => `
+    tbody.innerHTML = sentMessages.map(msg => {
+        const messageText = msg.message || '';
+        const truncated = messageText.length > 50 ? messageText.substring(0, 50) + '...' : messageText;
+        return `
         <tr class="border-b border-gray-800">
             <td class="p-2">${msg.target_number || msg.recipient || 'N/A'}</td>
-            <td class="p-2 max-w-xs truncate">${msg.message || ''}</td>
-            <td class="p-2"><span class="px-2 py-1 text-xs bg-green-900 text-green-400">delivered</span></td>
-            <td class="p-2">1</td>
+            <td class="p-2">
+                <span class="sms-message-box" onclick="openMessageModal('To: ${escapeHtml(msg.target_number || msg.recipient || 'N/A')}', '${new Date(msg.created_at).toLocaleString()}', '${escapeHtml(messageText)}')" title="Click to read full message">
+                    ${escapeHtml(truncated)}
+                </span>
+            </td>
+            <td class="p-2"><span class="px-2 py-1 text-xs ${msg.status === 'delivered' ? 'bg-green-900 text-green-400' : 'bg-yellow-900 text-yellow-400'}">${msg.status || 'sent'}</span></td>
+            <td class="p-2">${msg.attempts || 1}</td>
             <td class="p-2">${msg.created_at ? new Date(msg.created_at).toLocaleString() : 'N/A'}</td>
         </tr>
-    `).join('');
+    `}).join('');
 }
 
 // ============ CALLS ============
 async function loadCallsData() {
     document.getElementById('callsList').innerHTML = '<tr><td colspan="5" class="text-center p-4 text-gray-500">Calls feature coming soon</td></tr>';
 }
+
+// Close message modal with Escape key
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') {
+        closeMessageModal();
+        closeNotificationModal();
+    }
+});
 
 // Initialize
 document.addEventListener('DOMContentLoaded', () => {
