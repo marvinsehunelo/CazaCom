@@ -2,7 +2,12 @@
 declare(strict_types=1);
 
 /**
- * MTN MoMo Participant — full BankAPIInterface implementation.
+ * MTN MoMo Participant — standalone HTTP receiver, deployed on Cazacom's
+ * infrastructure as its own file. Deliberately self-contained: does
+ * NOT require any VouchMorph-repo files (src/Infrastructure/...) —
+ * this runs on Cazacom's server, which has no access to VouchMorph's
+ * codebase. Auth verification is inlined here rather than importing
+ * VouchMorph's AuthSchemeRegistry class.
  *
  * Covers all THREE things VouchMorph needs from MTN:
  *  - COLLECTION (requesttopay) — MTN as a SOURCE: verifyAsset/placeHold/
@@ -14,8 +19,9 @@ declare(strict_types=1);
  *    MTN's real public API (MoMo has no ATM network).
  *
  * Auth: accepts EITHER centralswitch's HMAC scheme OR VouchMorph's
- * API-key scheme on every endpoint, via AuthSchemeRegistry — same
- * "please everyone" pattern used elsewhere in this system.
+ * API-key scheme on every endpoint — same "please everyone" pattern
+ * used elsewhere in this system, now self-contained without external
+ * dependencies.
  *
  * $sandboxMode ('LOCAL' vs 'REMOTE') controls whether this simulates
  * everything in mtn_wallets/mtn_collections/mtn_transfers, or actually
@@ -23,15 +29,10 @@ declare(strict_types=1);
  */
 
 require_once __DIR__ . '/../config/db.php';
-require_once __DIR__ . '/../src/Infrastructure/Auth/AuthSchemeRegistry.php';
-require_once __DIR__ . '/../src/Infrastructure/Banks/Contracts/BankAPIInterface.php';
-
-use Infrastructure\Auth\AuthSchemeRegistry;
-use Infrastructure\Banks\Contracts\BankAPIInterface;
 
 header('Content-Type: application/json');
 
-class MtnMomoParticipant implements BankAPIInterface
+class MtnMomoParticipant
 {
     private PDO $db;
     private bool $sandboxMode;
@@ -99,33 +100,40 @@ class MtnMomoParticipant implements BankAPIInterface
         };
     }
 
+    /**
+     * Self-contained dual-auth check — no cross-repo class dependency.
+     * Accepts EITHER VouchMorph's API key OR centralswitch's HMAC,
+     * checked inline rather than via VouchMorph's AuthSchemeRegistry
+     * (which doesn't exist in this repo).
+     */
     private function verifyIncomingAuth(string $rawBody, array $headers): bool
     {
-        $registry = new AuthSchemeRegistry();
-        $accepted = [
-            [
-                'scheme' => 'HMAC_SHARED_SECRET',
-                'label' => 'CENTRALSWITCH',
-                'context' => [
-                    'secret' => getenv('MTN_SWITCH_SECRET') ?: '',
-                    'timestamp_header' => 'x-api-timestamp',
-                    'signature_header' => 'x-api-signature',
-                ],
-            ],
-            [
-                'scheme' => 'API_KEY',
-                'label' => 'VOUCHMORPH',
-                'context' => [
-                    'header_name' => 'x-api-key',
-                    'expected_key' => getenv('MTN_VOUCHMORPH_API_KEY') ?: '',
-                ],
-            ],
-        ];
-        $result = $registry->verifyAny($headers, $rawBody, $accepted);
-        if ($result['matched']) {
-            error_log("[MTN MoMo] Authenticated as: {$result['label']} via {$result['scheme']}");
+        $headersLower = array_change_key_case($headers, CASE_LOWER);
+
+        // Path 1: VouchMorph API key
+        $providedKey = $headersLower['x-api-key'] ?? null;
+        $expectedKey = getenv('MTN_VOUCHMORPH_API_KEY') ?: '';
+        if ($providedKey && $expectedKey && hash_equals($expectedKey, $providedKey)) {
+            error_log("[MTN MoMo] Authenticated via VOUCHMORPH API key");
+            return true;
         }
-        return $result['matched'];
+
+        // Path 2: centralswitch HMAC shared secret
+        $timestamp = $headersLower['x-api-timestamp'] ?? null;
+        $signature = $headersLower['x-api-signature'] ?? null;
+        $secret = getenv('MTN_SWITCH_SECRET') ?: '';
+
+        if ($timestamp && $signature && $secret) {
+            if (abs(time() - (int)$timestamp) <= 300) {
+                $expected = hash_hmac('sha256', $timestamp . $rawBody, $secret);
+                if (hash_equals($expected, $signature)) {
+                    error_log("[MTN MoMo] Authenticated via CENTRALSWITCH HMAC");
+                    return true;
+                }
+            }
+        }
+
+        return false;
     }
 
     // ============================================================
@@ -704,40 +712,14 @@ class MtnMomoParticipant implements BankAPIInterface
         return $wallet ? ['success' => true, 'data' => $wallet] : ['success' => false, 'message' => 'Wallet not found'];
     }
 
-    // ============================================================
-    // BankAPIInterface methods not applicable to MTN MoMo — explicit
-    // refusal, not silent no-ops.
-    // ============================================================
-    private function notSupported(string $method): array
-    {
-        return ['success' => false, 'message' => "{$method} is not supported by MTN MoMo — no ATM/card infrastructure, or not yet implemented"];
-    }
-
-    public function initiateSourceLink(array $params): array { return $this->notSupported('initiateSourceLink'); }
-    public function verifySourceLink(array $params): array { return $this->notSupported('verifySourceLink'); }
-    public function refreshSourceToken(array $params): array { return $this->notSupported('refreshSourceToken'); }
-    public function revokeSourceToken(array $params): array { return $this->notSupported('revokeSourceToken'); }
-    public function useSourceToken(array $params): array { return $this->notSupported('useSourceToken'); }
-    public function getAuthorizationUrl(string $redirectUri, string $state, array $scope = []): string { throw new \RuntimeException('Not supported by MTN MoMo'); }
-    public function exchangeCodeForToken(string $code, string $redirectUri): array { return $this->notSupported('exchangeCodeForToken'); }
-    public function refreshAccessToken(string $refreshToken): array { return $this->notSupported('refreshAccessToken'); }
-    public function revokeToken(string $token, string $tokenType = 'access_token'): bool { return false; }
-    public function getUserInfo(string $accessToken): array { return $this->notSupported('getUserInfo'); }
-    public function getAccountBalance(string $accessToken, string $accountId): array { return $this->notSupported('getAccountBalance'); }
-    public function getTransactions(string $accessToken, string $accountId, int $limit = 50, int $offset = 0): array { return $this->notSupported('getTransactions'); }
-    public function generateToken(array $payload): array { return $this->notSupported('generateToken — no ATM network'); }
-    public function verifyToken(array $payload): array { return $this->notSupported('verifyToken — no ATM network'); }
-    public function confirmCashout(array $payload): array { return $this->confirmAgentCashout($payload); }
-    public function verifyAssetSigned(array $payload): array { return $this->verifyAsset($payload); }
-    public function placeHoldSigned(array $payload): array { return $this->placeHold($payload); }
-    public function transferWithProof(array $payload): array { return $this->processDeposit($payload); }
-    public function generateTokenWithProof(array $payload): array { return $this->notSupported('generateTokenWithProof — no ATM network'); }
-    public function processDepositWithProof(array $payload): array { return $this->processDeposit($payload); }
-    public function transfer(array $payload, ?string $type = null): array { return $this->processDeposit($payload); }
-    public function reverse(array $payload): array { return $this->releaseHold($payload); }
     public function checkStatus(string $reference): array
     {
-        $stmt = $this->db->prepare("SELECT * FROM mtn_collections WHERE reference_id = ? UNION SELECT reference_id, NULL, payee_msisdn as payer_msisdn, amount, currency, status, payer_message, payee_note, NULL as hold_reference, created_at, completed_at FROM mtn_transfers WHERE reference_id = ?");
+        $stmt = $this->db->prepare("
+            SELECT * FROM mtn_collections WHERE reference_id = ? 
+            UNION 
+            SELECT reference_id, NULL, payee_msisdn as payer_msisdn, amount, currency, status, payer_message, payee_note, NULL as hold_reference, created_at, completed_at 
+            FROM mtn_transfers WHERE reference_id = ?
+        ");
         $stmt->execute([$reference, $reference]);
         $result = $stmt->fetch(PDO::FETCH_ASSOC);
         return $result ? ['success' => true, 'data' => $result] : ['success' => false, 'message' => 'Reference not found'];
