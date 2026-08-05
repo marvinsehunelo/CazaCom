@@ -3,31 +3,22 @@ declare(strict_types=1);
 
 /**
  * MTN MoMo Participant — single-file simulation, hosted on Cazacom's
- * infrastructure (technical_host_participant_id -> CAZACOM in
- * switch_participants), but MTN remains an independent DIRECT
+ * infrastructure. MTN remains an independent DIRECT switch
  * participant with its own settlement account and API key.
  *
- * Method names deliberately mirror MTN MoMo's real public Open API
- * (Disbursement product) so swapping $sandboxMode to call the real
- * MTN sandbox later is a drop-in change, not a rewrite:
- *   - transfer()                 -> POST /disbursement/v1_0/transfer
- *   - getTransferStatus()        -> GET  /disbursement/v1_0/transfer/{referenceId}
- *   - validateAccountHolder()    -> GET  /disbursement/v1_0/accountholder/msisdn/{msisdn}/active
+ * transfer()/getTransferStatus() mirror MTN MoMo's real public
+ * Disbursement API so switching $sandboxMode to call the real MTN
+ * sandbox later is a drop-in change. Agent cashout is local business
+ * logic layered on top (MTN's real API has no concept of it).
  *
- * Everything below transfer()/getTransferStatus() (agent cashout) is
- * VouchMorph/Cazacom business logic layered on top — MTN's real API
- * has no concept of "agent hands over physical cash", so that part
- * stays local regardless of sandbox vs production mode.
- *
- * Entry point: routes on ?action=, single file, no separate router.
- *   POST /mtn_momo_participant.php?action=switch_webhook   <- called BY centralswitch
- *   POST /mtn_momo_participant.php?action=initiate_cashout <- called by MTN app/USSD
- *   POST /mtn_momo_participant.php?action=confirm_cashout  <- called by agent app
- *   GET  /mtn_momo_participant.php?action=wallet_balance
+ * Entry point routes on ?action=:
+ *   POST ?action=switch_webhook   <- called BY centralswitch (signed)
+ *   POST ?action=initiate_cashout <- called by MTN app/USSD
+ *   POST ?action=confirm_cashout  <- called by agent app
+ *   GET  ?action=wallet_balance
  */
 
-require_once __DIR__ . '/../config/db.php'; // reuse the same getDB()/$pdo from centralswitch, OR
-                                             // point at MTN's own DB connection if it's separate infra.
+require_once __DIR__ . '/../config/db.php'; // adjust path if MTN's DB connection differs from the switch's
 
 header('Content-Type: application/json');
 
@@ -36,9 +27,6 @@ class MtnMomoParticipant
     private PDO $db;
     private bool $sandboxMode;
 
-    // MTN MoMo Disbursement sandbox credentials — leave null while
-    // fully simulating locally; fill these in once real sandbox
-    // access is granted and flip $sandboxMode to 'REMOTE'.
     private ?string $subscriptionKey;
     private ?string $apiUser;
     private ?string $apiKey;
@@ -49,8 +37,6 @@ class MtnMomoParticipant
     public function __construct(PDO $db)
     {
         $this->db = $db;
-        // 'LOCAL'  = simulate everything in mtn_wallets/mtn_transfers, no external calls.
-        // 'REMOTE' = actually call MTN's sandbox/production Disbursement API.
         $this->sandboxMode = (getenv('MTN_MODE') ?: 'LOCAL') === 'LOCAL';
 
         $this->subscriptionKey = getenv('MTN_SUBSCRIPTION_KEY') ?: null;
@@ -62,10 +48,10 @@ class MtnMomoParticipant
     // ============================================================
     // ENTRY POINT
     // ============================================================
-    public function handleRequest(string $action, array $input): array
+    public function handleRequest(string $action, array $input, string $rawBody, array $headers): array
     {
         return match ($action) {
-            'switch_webhook' => $this->handleSwitchWebhook($input),
+            'switch_webhook' => $this->handleSwitchWebhook($input, $rawBody, $headers),
             'initiate_cashout' => $this->initiateAgentCashout($input),
             'confirm_cashout' => $this->confirmAgentCashout($input),
             'wallet_balance' => $this->getWalletBalance($input['msisdn'] ?? ''),
@@ -74,27 +60,69 @@ class MtnMomoParticipant
     }
 
     // ============================================================
-    // 1. SWITCH WEBHOOK — called by centralswitch when a transaction
-    //    destined for MTN settles. This is where the switch's
-    //    aggregate settlement movement gets fanned out to the
-    //    ACTUAL customer wallet — the switch has no idea this
-    //    customer-level ledger exists.
+    // 1. SWITCH WEBHOOK — verifies the request actually came from
+    //    centralswitch before doing anything, then fans the switch's
+    //    aggregate settlement out to the specific customer wallet.
     // ============================================================
-    private function handleSwitchWebhook(array $input): array
+    private function handleSwitchWebhook(array $input, string $rawBody, array $headers): array
     {
-        $required = ['transaction_reference', 'status', 'amount', 'currency', 'destination_account_number'];
+        $headersLower = array_change_key_case($headers, CASE_LOWER);
+        $timestamp = $headersLower['x-api-timestamp'] ?? null;
+        $signature = $headersLower['x-api-signature'] ?? null;
+        $secret = getenv('MTN_SWITCH_SECRET') ?: null;
+
+        if (!$timestamp || !$signature) {
+            http_response_code(401);
+            return ['success' => false, 'message' => 'Missing signature headers'];
+        }
+        if (!$secret) {
+            http_response_code(500);
+            error_log("[MTN MoMo] MTN_SWITCH_SECRET not configured — cannot verify webhook");
+            return ['success' => false, 'message' => 'Server not configured to verify webhooks'];
+        }
+        if (abs(time() - (int)$timestamp) > 300) {
+            http_response_code(401);
+            return ['success' => false, 'message' => 'Signature timestamp expired'];
+        }
+
+        // IMPORTANT: signs the RAW body, exactly as the switch signed it.
+        // Re-encoding $input via json_encode() here would produce a
+        // different byte string (key order, whitespace) and always fail.
+        $expected = hash_hmac('sha256', $timestamp . $rawBody, $secret);
+        if (!hash_equals($expected, $signature)) {
+            http_response_code(401);
+            error_log("[MTN MoMo] Webhook signature verification FAILED");
+            return ['success' => false, 'message' => 'Invalid signature'];
+        }
+
+        // ---- Verified. Proceed. ----
+        $required = ['transaction_reference', 'status'];
         foreach ($required as $r) {
-            if (empty($input[$r]) && $input[$r] !== 0) {
+            if (empty($input[$r])) {
                 return ['success' => false, 'message' => "Missing field: {$r}"];
             }
         }
 
+        // NOTE: dispatchCallback() on the switch side currently sends
+        // only {transaction_reference, status, timestamp} — it does NOT
+        // include amount/currency/destination_account_number. If you
+        // want handleSwitchWebhook to actually credit a wallet here
+        // (rather than just acknowledging), extend dispatchCallback()
+        // in submit_transfer.php to include those three fields in the
+        // signed payload, or have MTN look them up via GET
+        // api/v1/transactions.php?reference=... using its own API key
+        // once it receives this notification. Flagging this gap
+        // explicitly rather than silently guessing values.
         if ($input['status'] !== 'COMPLETED') {
-            // Switch reported FAILED/REVERSED — nothing to credit.
             return ['success' => true, 'message' => 'Acknowledged, no wallet action for non-COMPLETED status'];
         }
 
-        $referenceId = 'MTNXFER_' . hash('sha256', $input['transaction_reference']); // deterministic, idempotent
+        if (empty($input['amount']) || empty($input['currency']) || empty($input['destination_account_number'])) {
+            error_log("[MTN MoMo] Webhook verified but missing amount/currency/destination_account_number for {$input['transaction_reference']} — cannot credit wallet yet. Extend dispatchCallback() payload.");
+            return ['success' => true, 'message' => 'Signature verified, but payload incomplete for wallet credit — see server log'];
+        }
+
+        $referenceId = 'MTNXFER_' . hash('sha256', $input['transaction_reference']);
 
         return $this->transfer([
             'reference_id' => $referenceId,
@@ -109,36 +137,20 @@ class MtnMomoParticipant
 
     // ============================================================
     // 2. transfer() — mirrors MTN MoMo Disbursement /transfer.
-    //    This IS the "deposit" — credits a customer (or agent)
-    //    wallet. Idempotent on reference_id.
+    //    Idempotent on reference_id.
     // ============================================================
     public function transfer(array $params): array
     {
-        // Idempotency: same reference_id already processed -> return existing result.
         $stmt = $this->db->prepare("SELECT * FROM mtn_transfers WHERE reference_id = ?");
         $stmt->execute([$params['reference_id']]);
         $existing = $stmt->fetch();
         if ($existing) {
-            return [
-                'success' => true,
-                'message' => 'Duplicate reference_id — returning existing transfer',
-                'data' => $existing,
-            ];
+            return ['success' => true, 'message' => 'Duplicate reference_id — returning existing transfer', 'data' => $existing];
         }
 
-        if ($this->sandboxMode) {
-            return $this->localTransfer($params);
-        }
-
-        return $this->remoteTransfer($params);
+        return $this->sandboxMode ? $this->localTransfer($params) : $this->remoteTransfer($params);
     }
 
-    /**
-     * LOCAL simulation: credits mtn_wallets directly. Auto-creates
-     * the wallet if the MSISDN has never been seen (mirrors a real
-     * MoMo account being auto-provisioned on first credit in some
-     * markets — adjust if MTN requires pre-registration instead).
-     */
     private function localTransfer(array $params): array
     {
         $this->db->beginTransaction();
@@ -174,7 +186,6 @@ class MtnMomoParticipant
             $transfer = $stmt->fetch();
 
             $this->db->commit();
-
             return ['success' => true, 'message' => 'Transfer successful (simulated)', 'data' => $transfer];
 
         } catch (Exception $e) {
@@ -183,12 +194,6 @@ class MtnMomoParticipant
         }
     }
 
-    /**
-     * REMOTE: actual MTN MoMo Disbursement API call. Fill in once
-     * real sandbox credentials exist. Kept structurally identical to
-     * localTransfer()'s bookkeeping (same mtn_transfers insert) so
-     * switching modes doesn't change anything callers see.
-     */
     private function remoteTransfer(array $params): array
     {
         $token = $this->getAccessToken();
@@ -223,8 +228,6 @@ class MtnMomoParticipant
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         curl_close($ch);
 
-        // MTN's transfer endpoint returns 202 Accepted immediately;
-        // real status comes from a subsequent getTransferStatus() poll.
         $status = ($httpCode === 202) ? 'PENDING' : 'FAILED';
 
         $stmt = $this->db->prepare("
@@ -243,15 +246,12 @@ class MtnMomoParticipant
         return ['success' => $httpCode === 202, 'message' => "MTN responded HTTP {$httpCode}", 'data' => $stmt->fetch()];
     }
 
-    // getTransferStatus() -> GET /disbursement/v1_0/transfer/{referenceId}
     public function getTransferStatus(string $referenceId): array
     {
         $stmt = $this->db->prepare("SELECT * FROM mtn_transfers WHERE reference_id = ?");
         $stmt->execute([$referenceId]);
         $transfer = $stmt->fetch();
-        return $transfer
-            ? ['success' => true, 'data' => $transfer]
-            : ['success' => false, 'message' => 'Reference not found'];
+        return $transfer ? ['success' => true, 'data' => $transfer] : ['success' => false, 'message' => 'Reference not found'];
     }
 
     private function getAccessToken(): ?string
@@ -260,7 +260,7 @@ class MtnMomoParticipant
             return $this->cachedToken;
         }
         if (!$this->apiUser || !$this->apiKey || !$this->subscriptionKey) {
-            return null; // remote mode requested but credentials not configured
+            return null;
         }
 
         $ch = curl_init($this->baseUrl . '/disbursement/token/');
@@ -286,9 +286,8 @@ class MtnMomoParticipant
     }
 
     // ============================================================
-    // 3. AGENT CASHOUT — VouchMorph/local business logic, NOT part
-    //    of MTN's real public API. Two-step: fund the agent's
-    //    wallet, then agent confirms physical handover.
+    // 3. AGENT CASHOUT — local business logic, not part of MTN's
+    //    real public API.
     // ============================================================
     public function initiateAgentCashout(array $params): array
     {
@@ -319,7 +318,6 @@ class MtnMomoParticipant
                 $agentWallet = $stmt->fetch();
             }
 
-            // Move funds customer -> agent (internal, no switch involvement).
             $this->db->prepare("UPDATE mtn_wallets SET balance = balance - ? WHERE wallet_id = ?")
                 ->execute([$params['amount'], $customerWallet['wallet_id']]);
             $this->db->prepare("UPDATE mtn_wallets SET balance = balance + ? WHERE wallet_id = ?")
@@ -343,7 +341,6 @@ class MtnMomoParticipant
 
             $this->db->commit();
 
-            // In production: SMS the cash_code to the customer here.
             return ['success' => true, 'message' => 'Cashout funded — agent wallet credited, awaiting handoff', 'data' => $cashout];
 
         } catch (Exception $e) {
@@ -388,18 +385,20 @@ class MtnMomoParticipant
 }
 
 // ============================================================
-// ROUTING — single file, action param, no separate router file.
+// ROUTING
 // ============================================================
 try {
     $pdo = getDB();
     $participant = new MtnMomoParticipant($pdo);
 
     $action = $_GET['action'] ?? '';
+    $rawBody = file_get_contents('php://input');
     $input = $_SERVER['REQUEST_METHOD'] === 'POST'
-        ? (json_decode(file_get_contents('php://input'), true) ?? [])
+        ? (json_decode($rawBody, true) ?? [])
         : $_GET;
+    $headers = getallheaders() ?: [];
 
-    echo json_encode($participant->handleRequest($action, $input));
+    echo json_encode($participant->handleRequest($action, $input, $rawBody, $headers));
 
 } catch (Exception $e) {
     http_response_code(500);
