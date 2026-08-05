@@ -20,6 +20,54 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../config/db.php'; // adjust path if MTN's DB connection differs from the switch's
 
+// ============================================================
+// AUTHENTICATION FUNCTION
+// ============================================================
+function handleIncomingRequest(array $input, string $rawBody, array $headers): array
+{
+    $registry = new \Infrastructure\Auth\AuthSchemeRegistry();
+
+    $accepted = [
+        [
+            'scheme' => 'HMAC_SHARED_SECRET',
+            'label' => 'CENTRALSWITCH',
+            'context' => [
+                'secret' => getenv('MTN_SWITCH_SECRET') ?: '',
+                'timestamp_header' => 'x-api-timestamp',
+                'signature_header' => 'x-api-signature',
+            ],
+        ],
+        [
+            'scheme' => 'API_KEY',
+            'label' => 'VOUCHMORPH',
+            'context' => [
+                'header_name' => 'x-api-key',
+                'expected_key' => getenv('MTN_VOUCHMORPH_API_KEY') ?: '',
+            ],
+        ],
+        // Adding a THIRD counterparty with a THIRD scheme later
+        // (e.g. real MTN MoMo OAuth) is one more array entry here —
+        // nothing else in this file changes.
+    ];
+
+    $result = $registry->verifyAny($headers, $rawBody, $accepted);
+
+    if (!$result['matched']) {
+        http_response_code(401);
+        return ['success' => false, 'message' => 'No accepted auth scheme matched'];
+    }
+
+    error_log("[MTN MoMo] Authenticated as caller: {$result['label']} via {$result['scheme']}");
+
+    // $result['label'] tells you WHO called — CENTRALSWITCH vs
+    // VOUCHMORPH may legitimately need different handling downstream
+    // (e.g. VOUCHMORPH direct calls might carry different payload
+    // shape than the switch's webhook), so branch on it if needed.
+
+    // Return auth result for downstream use
+    return ['success' => true, 'auth' => $result];
+}
+
 header('Content-Type: application/json');
 
 class MtnMomoParticipant
@@ -48,7 +96,7 @@ class MtnMomoParticipant
     // ============================================================
     // ENTRY POINT
     // ============================================================
-    public function handleRequest(string $action, array $input, string $rawBody, array $headers): array
+    public function handleRequest(string $action, array $input, string $rawBody, array $headers, ?array $auth = null): array
     {
         return match ($action) {
             'switch_webhook' => $this->handleSwitchWebhook($input, $rawBody, $headers),
@@ -398,7 +446,18 @@ try {
         : $_GET;
     $headers = getallheaders() ?: [];
 
-    echo json_encode($participant->handleRequest($action, $input, $rawBody, $headers));
+    // PERFORM AUTHENTICATION FIRST for all incoming requests
+    $authResult = handleIncomingRequest($input, $rawBody, $headers);
+    
+    // If authentication failed, the function already sent the 401 response
+    if (!$authResult['success']) {
+        echo json_encode($authResult);
+        exit;
+    }
+
+    // Authentication passed - proceed with the request
+    // Pass auth info to handleRequest if needed for downstream logic
+    echo json_encode($participant->handleRequest($action, $input, $rawBody, $headers, $authResult['auth'] ?? null));
 
 } catch (Exception $e) {
     http_response_code(500);
