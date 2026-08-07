@@ -28,7 +28,7 @@ declare(strict_types=1);
  * calls MTN's Disbursement + Collection sandbox/production APIs.
  */
 
-require_once __DIR__ . '/../config/db.php';
+require_once __DIR__ . '/../../config/db.php';
 
 header('Content-Type: application/json');
 
