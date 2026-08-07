@@ -69,6 +69,8 @@ class Database {
     }
 }
 
+
+
 // Optional: Test connection if this file is run directly
 if (php_sapi_name() === 'cli' && !defined('CONSOLE_MODE')) {
     define('CONSOLE_MODE', true);
@@ -78,6 +80,28 @@ if (php_sapi_name() === 'cli' && !defined('CONSOLE_MODE')) {
         echo "✅ Database connection successful!\n";
     } else {
         echo "❌ Database connection failed\n";
+    }
+}
+
+    // ============================================================
+// getDB() — thin functional wrapper around the Database class,
+// for files (like mtn_momo_participant.php) that expect a simple
+// getDB(): PDO helper rather than instantiating Database directly.
+// Purely additive: does not change Database's existing behavior,
+// so anything already using `new Database()` / ->getConnection()
+// elsewhere in this codebase is completely unaffected.
+// ============================================================
+if (!function_exists('getDB')) {
+    function getDB(): PDO {
+        static $pdo = null;
+        if ($pdo === null) {
+            $database = new Database();
+            $pdo = $database->getConnection();
+            if ($pdo === null) {
+                throw new Exception('getDB(): failed to establish database connection');
+            }
+        }
+        return $pdo;
     }
 }
 ?>
