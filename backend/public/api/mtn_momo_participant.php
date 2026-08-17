@@ -26,6 +26,18 @@ declare(strict_types=1);
  * $sandboxMode ('LOCAL' vs 'REMOTE') controls whether this simulates
  * everything in mtn_wallets/mtn_collections/mtn_transfers, or actually
  * calls MTN's Disbursement + Collection sandbox/production APIs.
+ *
+ * FIX (this revision): the 'wallet_balance' action read
+ * $input['msisdn'], a field that is never actually sent by
+ * VouchMorph's GenericBankClient — it sends 'source_identifier'
+ * (plus aliases 'phone', 'wallet_phone', 'account_number', etc via
+ * addSourceIdentifier(), but never 'msisdn'). Every real balance
+ * check therefore looked up an empty string and returned "Wallet not
+ * found" regardless of whether the MSISDN actually existed in
+ * mtn_wallets — confirmed live for +26779000000 through +26779000004,
+ * all of which have real, non-zero balances in mtn_wallets. The
+ * lookup itself (getWalletBalanceAction) was always correct; only the
+ * field name pulled from $input was wrong.
  */
 
 require_once __DIR__ . '/../../config/db.php';
@@ -95,7 +107,22 @@ class MtnMomoParticipant
             'check_status' => $this->checkStatus($input['reference'] ?? ''),
             'initiate_cashout' => $this->initiateAgentCashout($input),
             'confirm_cashout' => $this->confirmAgentCashout($input),
-            'wallet_balance' => $this->getWalletBalanceAction($input['msisdn'] ?? ''),
+            // FIX: was $input['msisdn'] ?? '' — that key is never sent
+            // by GenericBankClient. It sends 'source_identifier' plus
+            // aliases 'phone'/'wallet_phone'/'account_number'/etc, but
+            // never literally 'msisdn'. Every real balance check was
+            // therefore looking up an empty string. Now checks all the
+            // field names GenericBankClient::addSourceIdentifier()
+            // actually populates, still preferring 'msisdn' first for
+            // any caller that does send it directly.
+            'wallet_balance' => $this->getWalletBalanceAction(
+                $input['msisdn']
+                    ?? $input['source_identifier']
+                    ?? $input['phone']
+                    ?? $input['wallet_phone']
+                    ?? $input['account_number']
+                    ?? ''
+            ),
             default => ['success' => false, 'message' => "Unknown action: {$action}"],
         };
     }
