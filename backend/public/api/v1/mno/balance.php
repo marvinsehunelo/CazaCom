@@ -12,7 +12,7 @@
 
 header("Content-Type: application/json; charset=utf-8");
 
-require_once __DIR__ . '/../../../../config/db.php';
+require_once __DIR__ . '/../../../config/db.php';
 
 error_log("=== CAZACOM balance.php CALLED ===");
 error_log("Headers: " . json_encode(getallheaders()));
@@ -55,8 +55,12 @@ if ($apiKey) {
     else {
         try {
             if (!isset($pdo)) {
-                $pdo = new PDO(getenv('DATABASE_URL'));
-                $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+                // NOTE: was `new PDO(getenv('DATABASE_URL'))` — DATABASE_URL
+                // on Railway is a connection URL (postgresql://user:pass@host/db),
+                // not a valid PDO DSN string, so that call always threw.
+                // getDB() (defined in config/db.php) correctly parses the URL
+                // into a proper pgsql: DSN before connecting.
+                $pdo = getDB();
             }
 
             $stmt = $pdo->prepare("
@@ -94,8 +98,7 @@ if (!$isValidApiKey) {
 // ============================================
 try {
     if (!isset($pdo)) {
-        $pdo = new PDO(getenv('DATABASE_URL'));
-        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $pdo = getDB();
     }
     error_log("Database connected successfully");
 } catch (Exception $e) {
@@ -103,7 +106,8 @@ try {
     http_response_code(500);
     echo json_encode([
         "success" => false,
-        "message" => "Database connection failed"
+        "message" => "Database connection failed",
+        "details" => $e->getMessage()
     ]);
     exit;
 }
