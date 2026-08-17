@@ -3,6 +3,16 @@
  * /Backend/api/v1/mno/verify_wallet.php
  * CAZACOM - Verify wallet balance and ownership
  * Simple API Key authentication for VouchMorph
+ *
+ * SCHEMA CORRECTED to match actual CAZACOM tables:
+ *   users: id, name, phone_number, email, password_hash, pin_hash,
+ *          created_at, pin_failed_attempts, pin_locked_until
+ *          (no full_name, no phone, no kyc_verified)
+ *   mobile_money_accounts: id, user_id, balance, credit_balance,
+ *          last_updated
+ *          (no wallets table, no currency, no status column)
+ * PIN fields live on users, not on any wallet-side table — moved
+ * accordingly.
  */
 
 header("Content-Type: application/json; charset=utf-8");
@@ -32,6 +42,7 @@ $envApiKey = getenv('CAZACOM_API_KEY');
 // Validate API Key
 $isValidApiKey = false;
 $clientName = 'Unknown';
+$pdo = null;
 
 if ($apiKey) {
     // Check hardcoded keys
@@ -49,19 +60,23 @@ if ($apiKey) {
     // Check database
     else {
         try {
-            if (!isset($pdo)) {
-                $pdo = new PDO(getenv('DATABASE_URL'));
-                $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+            if (!isset($pdo) || $pdo === null) {
+                // Matches the connection pattern used by hold.php / debit.php /
+                // credit.php elsewhere in this codebase — NOT `new PDO(getenv(
+                // 'DATABASE_URL'))` directly, which fails because DATABASE_URL
+                // is a connection URL, not a valid PDO DSN string.
+                $database = new Database();
+                $pdo = $database->getConnection();
             }
-            
+
             $stmt = $pdo->prepare("
-                SELECT client_name, is_active 
-                FROM api_clients 
+                SELECT client_name, is_active
+                FROM api_clients
                 WHERE api_key = :api_key AND is_active = true
             ");
             $stmt->execute(['api_key' => $apiKey]);
             $client = $stmt->fetch(PDO::FETCH_ASSOC);
-            
+
             if ($client) {
                 $isValidApiKey = true;
                 $clientName = $client['client_name'];
@@ -89,9 +104,12 @@ if (!$isValidApiKey) {
 // 2. DATABASE CONNECTION
 // ============================================
 try {
-    if (!isset($pdo)) {
-        $pdo = new PDO(getenv('DATABASE_URL'));
-        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    if (!isset($pdo) || $pdo === null) {
+        $database = new Database();
+        $pdo = $database->getConnection();
+    }
+    if (!$pdo) {
+        throw new Exception('getConnection() returned null');
     }
     error_log("Database connected successfully");
 } catch (Exception $e) {
@@ -100,7 +118,8 @@ try {
     echo json_encode([
         "success" => false,
         "verified" => false,
-        "message" => "Database connection failed"
+        "message" => "Database connection failed",
+        "details" => $e->getMessage()
     ]);
     exit;
 }
@@ -114,12 +133,13 @@ if (!$input) {
 }
 error_log("Input data: " . json_encode($input));
 
-$phone = $input['phone'] ?? 
-         $input['wallet_phone'] ?? 
-         $input['destination_phone'] ?? 
-         $input['account_identifier'] ?? 
-         $input['identifier'] ?? 
-         $input['destination_phone_number'] ?? 
+$phone = $input['phone'] ??
+         $input['wallet_phone'] ??
+         $input['destination_phone'] ??
+         $input['account_identifier'] ??
+         $input['identifier'] ??
+         $input['destination_phone_number'] ??
+         $input['source_identifier'] ??
          null;
 
 $amount = isset($input['amount']) ? (float)$input['amount'] : 0;
@@ -156,22 +176,22 @@ error_log("Searching for wallet with phone: $searchPhone (formatted: $formattedP
 // 5. GET WALLET DATA
 // ============================================
 try {
-    // First check users table
     $stmt = $pdo->prepare("
-        SELECT 
+        SELECT
             u.id as user_id,
-            u.full_name,
-            u.phone as user_phone,
+            u.name as full_name,
+            u.phone_number as user_phone,
             u.email,
-            u.kyc_verified,
-            w.id as wallet_id,
-            w.balance,
-            w.credit_balance,
-            w.currency,
-            w.status as wallet_status
+            u.pin_hash,
+            u.pin_failed_attempts,
+            u.pin_locked_until,
+            m.id as account_id,
+            m.balance,
+            m.credit_balance,
+            m.last_updated
         FROM users u
-        LEFT JOIN wallets w ON u.id = w.user_id
-        WHERE u.phone = :phone
+        LEFT JOIN mobile_money_accounts m ON u.id = m.user_id
+        WHERE u.phone_number = :phone
         LIMIT 1
     ");
     $stmt->execute(['phone' => $searchPhone]);
@@ -180,20 +200,21 @@ try {
     // Try with formatted phone if not found
     if (!$wallet) {
         $stmt = $pdo->prepare("
-            SELECT 
+            SELECT
                 u.id as user_id,
-                u.full_name,
-                u.phone as user_phone,
+                u.name as full_name,
+                u.phone_number as user_phone,
                 u.email,
-                u.kyc_verified,
-                w.id as wallet_id,
-                w.balance,
-                w.credit_balance,
-                w.currency,
-                w.status as wallet_status
+                u.pin_hash,
+                u.pin_failed_attempts,
+                u.pin_locked_until,
+                m.id as account_id,
+                m.balance,
+                m.credit_balance,
+                m.last_updated
             FROM users u
-            LEFT JOIN wallets w ON u.id = w.user_id
-            WHERE u.phone = :phone
+            LEFT JOIN mobile_money_accounts m ON u.id = m.user_id
+            WHERE u.phone_number = :phone
             LIMIT 1
         ");
         $stmt->execute(['phone' => $formattedPhone]);
@@ -216,9 +237,9 @@ try {
 
     error_log("Found user: ID={$wallet['user_id']}, Name={$wallet['full_name']}");
 
-    // Check if wallet exists
-    if (empty($wallet['wallet_id'])) {
-        error_log("No wallet found for user: {$wallet['user_id']}");
+    // Check if a mobile money account exists for this user
+    if (empty($wallet['account_id'])) {
+        error_log("No mobile money account found for user: {$wallet['user_id']}");
         echo json_encode([
             "success" => false,
             "verified" => false,
@@ -227,16 +248,9 @@ try {
         exit;
     }
 
-    // Check wallet status
-    if ($wallet['wallet_status'] !== 'active') {
-        error_log("Wallet not active: {$wallet['wallet_status']}");
-        echo json_encode([
-            "success" => false,
-            "verified" => false,
-            "message" => "Wallet is not active (status: {$wallet['wallet_status']})"
-        ]);
-        exit;
-    }
+    // No status column exists on mobile_money_accounts — an account
+    // row existing at all is treated as active. If CAZACOM adds an
+    // account-status concept later, reintroduce a check here.
 
     // Calculate balance
     $balance = (float)($wallet['balance'] ?? 0);
@@ -247,21 +261,18 @@ try {
 
     // ============================================
     // 6. VERIFY PIN (Optional)
+    //
+    // PIN fields live on `users`, not on any wallet-side table — the
+    // original version queried a non-existent `wallets` table by
+    // wallet_id for this. Corrected to use the PIN fields already
+    // fetched above for this user.
     // ============================================
     if ($pin) {
         error_log("PIN verification requested");
-        // Get PIN hash from wallet
-        $pinStmt = $pdo->prepare("
-            SELECT pin_hash, pin_failed_attempts, pin_locked_until
-            FROM wallets
-            WHERE id = :wallet_id
-        ");
-        $pinStmt->execute(['wallet_id' => $wallet['wallet_id']]);
-        $pinData = $pinStmt->fetch(PDO::FETCH_ASSOC);
-        
-        if ($pinData && !empty($pinData['pin_hash'])) {
+
+        if (!empty($wallet['pin_hash'])) {
             // Check if PIN is locked
-            if ($pinData['pin_locked_until'] && strtotime($pinData['pin_locked_until']) > time()) {
+            if ($wallet['pin_locked_until'] && strtotime($wallet['pin_locked_until']) > time()) {
                 echo json_encode([
                     "success" => false,
                     "verified" => false,
@@ -269,25 +280,25 @@ try {
                 ]);
                 exit;
             }
-            
+
             // Verify PIN
-            if (!password_verify($pin, $pinData['pin_hash'])) {
+            if (!password_verify($pin, $wallet['pin_hash'])) {
                 // Increment failed attempts
-                $newAttempts = ($pinData['pin_failed_attempts'] ?? 0) + 1;
+                $newAttempts = ($wallet['pin_failed_attempts'] ?? 0) + 1;
                 $lockUntil = $newAttempts >= 3 ? date('Y-m-d H:i:s', time() + 900) : null;
-                
+
                 $updateStmt = $pdo->prepare("
-                    UPDATE wallets 
+                    UPDATE users
                     SET pin_failed_attempts = :attempts,
                         pin_locked_until = :lock_until
-                    WHERE id = :wallet_id
+                    WHERE id = :user_id
                 ");
                 $updateStmt->execute([
                     'attempts' => $newAttempts,
                     'lock_until' => $lockUntil,
-                    'wallet_id' => $wallet['wallet_id']
+                    'user_id' => $wallet['user_id']
                 ]);
-                
+
                 error_log("Invalid PIN for user {$wallet['user_id']}. Attempts: $newAttempts");
                 echo json_encode([
                     "success" => false,
@@ -296,19 +307,19 @@ try {
                 ]);
                 exit;
             }
-            
+
             // Reset failed attempts on success
             $resetStmt = $pdo->prepare("
-                UPDATE wallets 
+                UPDATE users
                 SET pin_failed_attempts = 0,
                     pin_locked_until = NULL
-                WHERE id = :wallet_id
+                WHERE id = :user_id
             ");
-            $resetStmt->execute(['wallet_id' => $wallet['wallet_id']]);
-            
+            $resetStmt->execute(['user_id' => $wallet['user_id']]);
+
             error_log("PIN verified successfully");
         } else {
-            error_log("No PIN set for wallet");
+            error_log("No PIN set for user");
             // Continue without PIN verification if no PIN set
         }
     }
@@ -330,25 +341,31 @@ try {
 
     // ============================================
     // 8. SUCCESS RESPONSE
+    //
+    // currency defaults to BWP since mobile_money_accounts has no
+    // currency column — matches every other participant in this
+    // deployment, which are all BWP-only per participants.yaml.
+    // kyc_verified has no backing column, defaults to false rather
+    // than silently claiming verification that was never checked.
     // ============================================
     $response = [
         "success" => true,
         "verified" => true,
-        "asset_id" => $wallet['wallet_id'],
+        "asset_id" => $wallet['account_id'],
         "asset_type" => "MNO-WALLET",
         "balance" => $availableBalance,
         "available_balance" => $availableBalance,
-        "currency" => $wallet['currency'] ?? 'BWP',
+        "currency" => 'BWP',
         "owner_name" => $wallet['full_name'] ?? 'Unknown User',
         "phone_number" => $formattedPhone,
         "email" => $wallet['email'] ?? null,
-        "kyc_verified" => (bool)($wallet['kyc_verified'] ?? false),
+        "kyc_verified" => false,
         "metadata" => [
             "user_id" => $wallet['user_id'],
-            "wallet_id" => $wallet['wallet_id'],
-            "wallet_status" => $wallet['wallet_status'],
+            "account_id" => $wallet['account_id'],
             "balance" => $balance,
-            "credit_balance" => $creditBalance
+            "credit_balance" => $creditBalance,
+            "last_updated" => $wallet['last_updated'] ?? null
         ]
     ];
 
