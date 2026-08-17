@@ -12,7 +12,7 @@
 
 header("Content-Type: application/json; charset=utf-8");
 
-require_once __DIR__ . '/../../../../config/db.php';
+require_once __DIR__ . '/../../../config/db.php';
 
 error_log("=== CAZACOM balance.php CALLED ===");
 error_log("Headers: " . json_encode(getallheaders()));
@@ -166,21 +166,24 @@ error_log("Searching for wallet with phone: $searchPhone (formatted: $formattedP
 // 5. GET WALLET DATA
 // ============================================
 try {
+    // NOTE: schema corrected to match actual CAZACOM tables —
+    // `users` has `name`/`phone_number` (not `full_name`/`phone`,
+    // and no `kyc_verified` column), and the wallet table is
+    // `mobile_money_accounts` (not `wallets`), which has no
+    // `currency` or `status` column.
     $stmt = $pdo->prepare("
         SELECT
             u.id as user_id,
-            u.full_name,
-            u.phone as user_phone,
+            u.name as full_name,
+            u.phone_number as user_phone,
             u.email,
-            u.kyc_verified,
-            w.id as wallet_id,
-            w.balance,
-            w.credit_balance,
-            w.currency,
-            w.status as wallet_status
+            m.id as account_id,
+            m.balance,
+            m.credit_balance,
+            m.last_updated
         FROM users u
-        LEFT JOIN wallets w ON u.id = w.user_id
-        WHERE u.phone = :phone
+        LEFT JOIN mobile_money_accounts m ON u.id = m.user_id
+        WHERE u.phone_number = :phone
         LIMIT 1
     ");
     $stmt->execute(['phone' => $searchPhone]);
@@ -191,18 +194,16 @@ try {
         $stmt = $pdo->prepare("
             SELECT
                 u.id as user_id,
-                u.full_name,
-                u.phone as user_phone,
+                u.name as full_name,
+                u.phone_number as user_phone,
                 u.email,
-                u.kyc_verified,
-                w.id as wallet_id,
-                w.balance,
-                w.credit_balance,
-                w.currency,
-                w.status as wallet_status
+                m.id as account_id,
+                m.balance,
+                m.credit_balance,
+                m.last_updated
             FROM users u
-            LEFT JOIN wallets w ON u.id = w.user_id
-            WHERE u.phone = :phone
+            LEFT JOIN mobile_money_accounts m ON u.id = m.user_id
+            WHERE u.phone_number = :phone
             LIMIT 1
         ");
         $stmt->execute(['phone' => $formattedPhone]);
@@ -224,8 +225,8 @@ try {
 
     error_log("Found user: ID={$wallet['user_id']}, Name={$wallet['full_name']}");
 
-    if (empty($wallet['wallet_id'])) {
-        error_log("No wallet found for user: {$wallet['user_id']}");
+    if (empty($wallet['account_id'])) {
+        error_log("No mobile money account found for user: {$wallet['user_id']}");
         echo json_encode([
             "success" => false,
             "message" => "No wallet found for this user"
@@ -233,14 +234,9 @@ try {
         exit;
     }
 
-    if ($wallet['wallet_status'] !== 'active') {
-        error_log("Wallet not active: {$wallet['wallet_status']}");
-        echo json_encode([
-            "success" => false,
-            "message" => "Wallet is not active (status: {$wallet['wallet_status']})"
-        ]);
-        exit;
-    }
+    // No status column exists on mobile_money_accounts — an account
+    // row existing at all is treated as active. If CAZACOM adds an
+    // account-status concept later, reintroduce a check here.
 
     // Calculate balance
     $balance = (float)($wallet['balance'] ?? 0);
@@ -257,19 +253,23 @@ try {
     // so both keys are provided under 'data' — same nesting SACCUSSALIS
     // and ZURUBANK's real balance.php endpoints already use, and which
     // the [GenericBankClient] "Balance from nested data" log line expects.
+    //
+    // currency defaults to BWP since mobile_money_accounts has no
+    // currency column — matches every other participant in this
+    // deployment, which are all BWP-only per participants.yaml.
     // ============================================
     $response = [
         "status" => "success",
         "verified" => true,
         "data" => [
-            "wallet_id" => $wallet['wallet_id'],
+            "account_id" => $wallet['account_id'],
             "user_id" => $wallet['user_id'],
             "phone_number" => $formattedPhone,
             "asset_type" => "WALLET",
             "balance" => $availableBalance,
             "available_balance" => $availableBalance,
-            "currency" => $wallet['currency'] ?? 'BWP',
-            "status" => $wallet['wallet_status'],
+            "currency" => 'BWP',
+            "last_updated" => $wallet['last_updated'] ?? null,
             "timestamp" => time()
         ],
         "requester" => "CAZACOM",
