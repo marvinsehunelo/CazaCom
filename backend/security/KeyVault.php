@@ -113,10 +113,27 @@ class KeyVault
     {
         $encrypted = $this->encrypt($keyValue);
         
+        // ============================================================
+        // FIX: was `ON CONFLICT (key_id, key_value) DO NOTHING`, which
+        // Postgres rejects outright (SQLSTATE 42P10) because no unique
+        // or exclusion constraint exists on that column pair — or on
+        // key_id alone. That's not a missing migration: encryption_keys
+        // (id, key_id, key_value, active, created_at, retired_at) is
+        // designed to hold MULTIPLE rows per key_id over time —
+        // rotateKey() deactivates the old row (active=false,
+        // retired_at=NOW()) and inserts a new one alongside it rather
+        // than replacing it, so key_id is intentionally non-unique.
+        // ON CONFLICT was never valid here.
+        //
+        // storeKeyInDb() has exactly one caller, and it only runs after
+        // getKeyFromDb() has already confirmed no active key exists for
+        // this $keyId — so the ON CONFLICT guard wasn't protecting
+        // against anything reachable in normal operation. A plain
+        // INSERT is correct.
+        // ============================================================
         $stmt = $this->db->prepare("
             INSERT INTO encryption_keys (key_id, key_value, active, created_at)
             VALUES (:id, :value, true, NOW())
-            ON CONFLICT (key_id, key_value) DO NOTHING
         ");
         
         return $stmt->execute([
