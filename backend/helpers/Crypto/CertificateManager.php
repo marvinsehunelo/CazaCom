@@ -1,7 +1,7 @@
 <?php
-// src/Infrastructure/Crypto/CertificateManager.php
+// helpers/Crypto/CertificateManager.php
 
-namespace Infrastructure\Crypto;
+namespace helpers\Crypto;
 
 class CertificateManager
 {
