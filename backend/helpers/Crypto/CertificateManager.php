@@ -13,7 +13,7 @@ class CertificateManager
     
     public function __construct(?string $vouchmorphpartnerName = null)
     {
-        $this->myName = $vouchmorphpartnerName ?? getenv('VOUCHMORPH_PARTNER_NAME') ?: 'VOUCHMORPH';
+        $this->myName = $vouchmorphpartnerName ?? getenv('VOUCHMORPH_PARTNER_NAME') ?: 'CAZACOM';
         
         // Load CA certificate
         $caPath = getenv('VOUCHMORPH_CA_CERT');
