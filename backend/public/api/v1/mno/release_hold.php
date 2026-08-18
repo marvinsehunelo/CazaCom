@@ -3,7 +3,7 @@
 header("Content-Type: application/json; charset=utf-8");
 require_once __DIR__ . '/../../../../config/db.php';
 require_once __DIR__ . '/../../../../security/ApiAuthenticator.php';
-use Cazacom\Security\ApiAuthenticator;
+use Security\ApiAuthenticator;
 
 // Same connection pattern as hold.php / debit.php / credit.php —
 // new PDO(getenv('DATABASE_URL')) is not a valid DSN, so it's not
@@ -17,7 +17,7 @@ if (!$db) {
 }
 
 $auth = new ApiAuthenticator($db);
-$client = $auth->authenticate();
+$participant = $auth->requireAuth(); 
 if (!in_array('initiate_payment', $client['scopes'])) {
     http_response_code(403);
     echo json_encode(['error' => 'insufficient_scope', 'message' => 'initiate_payment scope required']);
