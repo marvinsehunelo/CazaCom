@@ -3,9 +3,9 @@
 header("Content-Type: application/json; charset=utf-8");
 require_once __DIR__ . '/../../../../config/db.php';
 require_once __DIR__ . '/../../../../security/ApiAuthenticator.php';
-require_once __DIR__ . '/../../../../src/Infrastructure/Crypto/CertificateManager.php';
+require_once __DIR__ . '/../../../../helpers/Crypto/CertificateManager.php';
 use Security\ApiAuthenticator;
-use Infrastructure\Crypto\CertificateManager;
+use Crypto\CertificateManager;
 
 // FIX: was `new PDO(getenv('DATABASE_URL'))` — not a valid PDO DSN.
 // Single Database connection reused for both auth and the queries
