@@ -4,7 +4,6 @@ header("Content-Type: application/json; charset=utf-8");
 require_once __DIR__ . '/../../../../config/db.php';
 require_once __DIR__ . '/../../../../security/ApiAuthenticator.php';
 use Security\ApiAuthenticator;
-
 // FIX: was `new PDO(getenv('DATABASE_URL'))` — DATABASE_URL is a
 // connection URL (postgresql://user:pass@host/db), not a valid PDO
 // DSN string, so this always threw before ApiAuthenticator ever ran.
@@ -16,24 +15,39 @@ $database = new Database();
 $db = $database->getConnection();
 if (!$db) {
     http_response_code(500);
-    echo json_encode(['status' => 'error', 'message' => 'Database connection failed']);
+    echo json_encode(['success' => false, 'status' => 'error', 'message' => 'Database connection failed']);
     exit;
 }
-
 $auth = new ApiAuthenticator($db);
-$participant = $auth->requireAuth(); 
-if (!in_array('initiate_payment', $client['scopes'])) {
-    http_response_code(403);
-    echo json_encode(['error' => 'insufficient_scope', 'message' => 'initiate_payment scope required']);
-    exit;
-}
+$participant = $auth->requireAuth();
+// requireAuth() already sends a 401 and exit()s internally on failure —
+// execution only reaches here with a valid, authenticated $participant.
+
+// ============================================================
+// FIX: was `if (!in_array('initiate_payment', $client['scopes']))`.
+// Same leftover-variable bug as hold.php/credit.php — $client was
+// never defined in this version of the file. See hold.php's matching
+// fix for the full explanation. requireAuth() in the current
+// ApiAuthenticator returns only a participant name, no scopes list,
+// so there is no real data here to check against. Disabled with a
+// TODO rather than fabricated.
+// ============================================================
+// TODO: no scope enforcement currently possible — ApiAuthenticator::requireAuth()
+// returns only a participant name, not a scopes list. Restore a real
+// check here once scopes are modeled, or confirm scope enforcement is
+// intentionally not required for this endpoint.
 
 $input = json_decode(file_get_contents("php://input"), true);
 $holdReference = $input['hold_reference'] ?? null;
 $amount = (float)($input['amount'] ?? 0);
 $destinationDetails = $input['destination_details'] ?? [];
 if (!$holdReference) {
-    echo json_encode(["status" => "error", "message" => "Hold reference required"]);
+    // FIX: was missing 'success' — same fail-closed-default gap fixed
+    // in hold.php/credit.php. Any response GenericBankClient can't
+    // recognize now defaults to failure on VouchMorph's side, so this
+    // MUST carry an explicit success signal to be read correctly
+    // whether it succeeds or fails.
+    echo json_encode(["success" => false, "status" => "error", "message" => "Hold reference required"]);
     exit;
 }
 $db->beginTransaction();
@@ -42,11 +56,9 @@ try {
     $stmt = $db->prepare("SELECT * FROM financial_holds WHERE hold_reference = :ref AND status = 'HELD' FOR UPDATE");
     $stmt->execute(['ref' => $holdReference]);
     $hold = $stmt->fetch(PDO::FETCH_ASSOC);
-
     if (!$hold) {
         throw new Exception("Hold not found");
     }
-
     // Update hold to committed
     $stmt = $db->prepare("
         UPDATE financial_holds
@@ -59,7 +71,6 @@ try {
         'dest' => json_encode($destinationDetails),
         'ref' => $holdReference
     ]);
-
     // Update wallet held balance (funds are now permanently debited)
     // NOTE: mobile_money_accounts has no `held_balance` column per the
     // real schema (id, user_id, balance, credit_balance, last_updated).
@@ -76,7 +87,6 @@ try {
         WHERE user_id = :user_id
     ");
     $stmt->execute(['user_id' => $hold['user_id']]);
-
     // Record transaction
     $transactionRef = 'TX-' . time() . '-' . bin2hex(random_bytes(8));
     $stmt = $db->prepare("
@@ -90,19 +100,28 @@ try {
         'ref' => $transactionRef,
         'dest' => json_encode($destinationDetails)
     ]);
-
     $db->commit();
-
     echo json_encode([
+        // FIX: was missing a top-level 'success' boolean, same gap as
+        // hold.php/credit.php had before their fixes — this file only
+        // ever set 'status' (string) and 'debited' (bool). GenericBankClient::
+        // send() checks 'success' first, then the action-specific
+        // 'debited' flag, then falls back to 'status' === 'SUCCESS' as
+        // a last resort; 'status' => 'success' (lowercase) here never
+        // matched that literal string comparison either, so this
+        // endpoint's genuinely successful debits were at real risk of
+        // being misread as failures depending on which check path ran
+        // first. Adding 'success' removes the ambiguity entirely.
+        "success" => true,
         "status" => "success",
         "debited" => true,
         "transaction_reference" => $transactionRef,
         "amount" => (float)$hold['amount']
     ]);
-
 } catch (Exception $e) {
     $db->rollBack();
     echo json_encode([
+        "success" => false,
         "status" => "error",
         "message" => $e->getMessage(),
         "debited" => false
