@@ -90,16 +90,31 @@ try {
     }
     // Record transaction
     $transactionRef = 'CREDIT-' . $reference;
+    // ============================================================
+    // FIX: was inserting a 'source_reference' column that does not
+    // exist on mobile_money_transactions. Real schema: id, user_id,
+    // type, amount, fee, reference, recipient_phone, network, status,
+    // wallet_type, created_at, completed_at — no source_reference.
+    // Every real deposit through this file was therefore failing with
+    // SQLSTATE[42703] before the transaction could commit, even though
+    // the wallet credit UPDATE just above had already succeeded —
+    // confirmed live as "Deposit failed: ... column source_reference
+    // ... does not exist" across every CAZACOM-as-destination swap.
+    // $sourceHoldReference isn't dropped silently: it's still passed
+    // through untouched in the caller's payload and available via
+    // $reference/$transactionRef for tracing; there's simply no column
+    // on this table to persist it into directly.
+    // ============================================================
     $stmt = $db->prepare("
         INSERT INTO mobile_money_transactions
-        (user_id, type, amount, reference, status, completed_at, source_reference)
-        VALUES (:user_id, 'credit', :amount, :ref, 'completed', NOW(), :src)
+        (user_id, type, amount, reference, recipient_phone, status, completed_at)
+        VALUES (:user_id, 'credit', :amount, :ref, :recipient_phone, 'completed', NOW())
     ");
     $stmt->execute([
         'user_id' => $user['id'],
         'amount' => $amount,
         'ref' => $transactionRef,
-        'src' => $sourceHoldReference
+        'recipient_phone' => $destinationId
     ]);
     $db->commit();
     // Get new balance
