@@ -15,12 +15,37 @@ if (!$db) {
     exit;
 }
 $auth = new ApiAuthenticator($db);
-$participant = $auth->requireAuth(); 
-if (!in_array('initiate_payment', $client['scopes'])) {
-    http_response_code(403);
-    echo json_encode(['success' => false, 'error' => 'insufficient_scope', 'message' => 'initiate_payment scope required']);
-    exit;
-}
+$participant = $auth->requireAuth();
+// requireAuth() already sends a 401 and exit()s internally on failure —
+// execution only reaches here with a valid, authenticated $participant.
+
+// ============================================================
+// FIX: was `if (!in_array('initiate_payment', $client['scopes']))`.
+// $client was never defined in this version of the file — this is
+// leftover from an earlier edit that switched from
+// `$client = $auth->authenticate(...)` (which returned a client/scopes
+// array) to `$participant = $auth->requireAuth()` (which returns a
+// plain participant-name string) without updating this line. Once
+// requireAuth() itself was fixed to actually authenticate correctly
+// (see ApiAuthenticator.php's header-parsing fix), this became the
+// very next line to execute and would fatal with "Undefined variable
+// $client" on every successful auth.
+//
+// requireAuth() in the current ApiAuthenticator does not expose scopes
+// at all — there is no equivalent data available here to check against.
+// Rather than fabricate a scope check against data that doesn't exist,
+// this block is disabled with a clear TODO. If per-participant scope
+// enforcement (e.g. restricting which participants may initiate holds)
+// is required, KeyVault/ApiAuthenticator need to be extended to track
+// and return scopes per participant first — that's a real design
+// decision for whoever owns Cazacom's auth model, not something to
+// silently invent here.
+// ============================================================
+// TODO: no scope enforcement currently possible — ApiAuthenticator::requireAuth()
+// returns only a participant name, not a scopes list. Restore a real
+// check here once scopes are modeled, or confirm scope enforcement is
+// intentionally not required for this endpoint.
+
 $input = json_decode(file_get_contents("php://input"), true);
 $reference = $input['reference'] ?? null;
 $assetId = $input['asset_id'] ?? null;
