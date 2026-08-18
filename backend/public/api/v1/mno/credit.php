@@ -37,7 +37,27 @@ $participant = $auth->requireAuth();
 
 $input = json_decode(file_get_contents("php://input"), true);
 $reference = $input['reference'] ?? null;
-$destinationId = $input['destination_id'] ?? null;
+
+// ============================================================
+// FIX: was `$input['destination_id'] ?? null` — GenericBankClient
+// never sends a field called 'destination_id'. SwapService's deposit
+// payloads populate 'destination_identifier' (and, for WALLET asset
+// types specifically, also 'phone'/'wallet_phone'/'beneficiary_phone'
+// — see SwapService::processDepositWithProof()), but never
+// 'destination_id'. Every real deposit therefore hit this file's own
+// upfront required-fields guard immediately and failed with "Missing
+// required fields" before ever reaching the database — confirmed live
+// across every CAZACOM-as-destination swap this session. Now checks
+// the field names actually sent, with 'destination_id' kept as a
+// last-resort fallback for any caller that does send it directly.
+// ============================================================
+$destinationId = $input['destination_identifier']
+    ?? $input['phone']
+    ?? $input['wallet_phone']
+    ?? $input['beneficiary_phone']
+    ?? $input['destination_id']
+    ?? null;
+
 $amount = (float)($input['amount'] ?? 0);
 $sourceHoldReference = $input['source_hold_reference'] ?? null;
 if (!$reference || !$destinationId || $amount <= 0) {
