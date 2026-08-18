@@ -16,86 +16,45 @@ if (!$db) {
 }
 
 // ============================================================
-// FIX: Added certificate-based authentication for release_hold.php
-// 
-// The multi-source flow calls release_hold.php with certificate/signature
-// from the source institution (CAZACOM). Previously this file only used
-// ApiAuthenticator::requireAuth() which authenticates via API key but
-// does NOT validate the certificate/signature.
+// REVERT: the previous "certificate-based authentication" block
+// that lived here called verify_requester_signature($input, $db) —
+// a function that is not defined anywhere in this codebase (no
+// crypto.php, no equivalent helper). Every request to this endpoint
+// fataled with "Call to undefined function verify_requester_signature()"
+// while still returning HTTP 200, leaving multiple holds stuck in
+// 'HELD' status with customer balances not restored.
 //
-// This caused "Invalid signature from: CAZACOM" errors during rollback
-// because the signature wasn't being verified at all.
+// That block was also fixing the wrong problem. The
+// "Invalid signature from: CAZACOM" error it was meant to address
+// is thrown by AggregateSigner/SignatureVerifier on VouchMorph's
+// side while verifying the SIGNATURE ON CAZACOM'S HOLD-PLACEMENT
+// RESPONSE (in hold.php), during pool assembly — BEFORE any rollback
+// or release_hold call happens. It has nothing to do with
+// authenticating incoming requests to THIS endpoint. Every other
+// CAZACOM endpoint in this family (hold.php, verify_wallet.php,
+// balance.php) authenticates incoming requests via ApiAuthenticator
+// alone, with no certificate/signature check, and that works fine.
+// This endpoint now matches that same, working pattern.
 //
-// Now both authentication methods are supported:
-// 1. Certificate-based (for multi-source rollback flows)
-// 2. API key (for direct calls)
+// If CAZACOM's hold.php genuinely needs to start returning a signed
+// response (to satisfy SignatureVerifier the way ZURUBANK/SACCUSSALIS
+// already do), that is a separate change to hold.php's response, not
+// to auth on this endpoint. Do not re-add signature verification
+// here without first confirming that's actually where it belongs.
 // ============================================================
+$auth = new ApiAuthenticator($db);
+$participant = $auth->requireAuth();
+// requireAuth() already sends a 401 and exit()s internally on failure —
+// execution only reaches here with a valid, authenticated $participant.
+error_log("[CAZACOM release_hold] Authenticated via API key (participant: " . $participant . ")");
 
-// Get input data
-$input = json_decode(file_get_contents("php://input"), true);
-
-// ============================================================
-// FIX: Check for certificate-based authentication FIRST
-// ============================================================
-$authenticated = false;
-$participant = null;
-
-if (isset($input['certificate'], $input['signature'])) {
-    // Certificate-based auth (VouchMorph's real mechanism)
-    $verification = verify_requester_signature($input, $db);
-    if ($verification['valid'] ?? false) {
-        $authenticated = true;
-        $participant = $verification['requester'] ?? 'VOUCHMORPH';
-        error_log("[CAZACOM release_hold] Authenticated via CERTIFICATE (requester: " . $participant . ")");
-    } else {
-        error_log("[CAZACOM release_hold] Certificate signature INVALID: " . ($verification['message'] ?? 'unknown reason'));
-        http_response_code(401);
-        echo json_encode([
-            'success' => false,
-            'status' => 'error',
-            'message' => 'Invalid certificate signature',
-            'released' => false
-        ]);
-        exit;
-    }
-}
-
-// If certificate auth failed, try API key auth
-if (!$authenticated) {
-    $auth = new ApiAuthenticator($db);
-    $participant = $auth->requireAuth();
-    // requireAuth() already sends a 401 and exit()s internally on failure —
-    // execution only reaches here with a valid, authenticated $participant.
-    $authenticated = true;
-    error_log("[CAZACOM release_hold] Authenticated via API key (participant: " . $participant . ")");
-}
-
-// ============================================================
-// FIX: was `if (!in_array('initiate_payment', $client['scopes']))`.
-// Same leftover-variable bug as hold.php/credit.php/debit.php —
-// $client was never defined in this version of the file. Unlike
-// those three, this one is a hard TypeError (in_array()'s second
-// argument must be an array, not null), not a caught Exception —
-// so it killed every release_hold request before ANY JSON could be
-// returned, confirmed live:
-//   Uncaught TypeError: in_array(): Argument #2 ($haystack) must be
-//   of type array, null given in .../release_hold.php:21
-// This is the direct cause of a real hold placed at MTN during a
-// multi-source test being left un-recorded locally on VouchMorph's
-// side ("Hold was placed at MTN ... but could not be recorded
-// locally ... An emergency release was attempted") — the rollback
-// path that should have cleaned it up hit this same fatal.
-//
-// requireAuth() in the current ApiAuthenticator returns only a
-// participant name, no scopes list, so there is no real data here to
-// check against. Disabled with a TODO rather than fabricated — see
-// hold.php's matching fix for the full design question this leaves
-// open.
-// ============================================================
 // TODO: no scope enforcement currently possible — ApiAuthenticator::requireAuth()
 // returns only a participant name, not a scopes list. Restore a real
 // check here once scopes are modeled, or confirm scope enforcement is
 // intentionally not required for this endpoint.
+
+// Get input data
+$input = json_decode(file_get_contents("php://input"), true);
 
 // ============================================================
 // FIX: Extract hold_reference from multiple possible field names
@@ -142,7 +101,7 @@ try {
     ");
     $stmt->execute(['ref' => $holdReference]);
     $hold = $stmt->fetch(PDO::FETCH_ASSOC);
-    
+
     if (!$hold) {
         // Check if hold exists but in different status
         $stmt2 = $db->prepare("
@@ -151,11 +110,11 @@ try {
         ");
         $stmt2->execute(['ref' => $holdReference]);
         $existingHold = $stmt2->fetch(PDO::FETCH_ASSOC);
-        
+
         if ($existingHold) {
             // Hold exists but not in HELD status - already committed or released
             error_log("[CAZACOM release_hold] Hold exists but status is: " . $existingHold['status']);
-            
+
             if ($existingHold['status'] === 'RELEASED') {
                 // Already released - treat as success
                 $db->commit();
@@ -176,12 +135,12 @@ try {
                 throw new Exception("Hold exists but status is: " . $existingHold['status']);
             }
         }
-        
+
         throw new Exception("Hold not found");
     }
-    
+
     error_log("[CAZACOM release_hold] Found hold: user_id=" . $hold['user_id'] . ", amount=" . $hold['amount']);
-    
+
     // Mark the hold released
     $stmt = $db->prepare("
         UPDATE financial_holds
@@ -194,7 +153,7 @@ try {
         'reason' => $reason,
         'ref' => $holdReference
     ]);
-    
+
     // Restore the held amount to the account's balance. This is the
     // direct reverse of hold.php's "balance = balance - :amount" —
     // since mobile_money_accounts has no held_balance column, hold.php
@@ -210,24 +169,24 @@ try {
         'amount' => $hold['amount'],
         'user_id' => $hold['user_id']
     ]);
-    
+
     if ($stmt->rowCount() === 0) {
         // Should not happen if hold.php's own debit succeeded originally
         // (same user_id), but guard against silently "succeeding" with
         // no account to credit back, same as credit.php's rowCount check.
         throw new Exception("No mobile money account found to release funds back to");
     }
-    
+
     $db->commit();
-    
+
     // Get updated balance
     $stmt = $db->prepare("SELECT balance FROM mobile_money_accounts WHERE user_id = :user_id");
     $stmt->execute(['user_id' => $hold['user_id']]);
     $updatedWallet = $stmt->fetch(PDO::FETCH_ASSOC);
     $newBalance = $updatedWallet ? (float)$updatedWallet['balance'] : null;
-    
+
     error_log("[CAZACOM release_hold] Released hold: " . $holdReference . ", amount: " . $hold['amount'] . ", new balance: " . $newBalance);
-    
+
     echo json_encode([
         // FIX: was missing a top-level 'success' boolean — same gap
         // already fixed in hold.php/credit.php/debit.php. This file
@@ -247,7 +206,7 @@ try {
         "reason" => $reason,
         "user_id" => $hold['user_id']
     ]);
-    
+
 } catch (Exception $e) {
     $db->rollBack();
     error_log("[CAZACOM release_hold] ERROR: " . $e->getMessage());
