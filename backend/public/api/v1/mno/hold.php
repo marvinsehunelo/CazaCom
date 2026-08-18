@@ -3,8 +3,9 @@
 header("Content-Type: application/json; charset=utf-8");
 require_once __DIR__ . '/../../../../config/db.php';
 require_once __DIR__ . '/../../../../security/ApiAuthenticator.php';
-require_once __DIR__ . '/../../../../security/CazacomResponseSigner.php';
+require_once __DIR__ . '/../../../../src/Infrastructure/Crypto/CertificateManager.php';
 use Security\ApiAuthenticator;
+use Infrastructure\Crypto\CertificateManager;
 
 // FIX: was `new PDO(getenv('DATABASE_URL'))` — not a valid PDO DSN.
 // Single Database connection reused for both auth and the queries
@@ -22,35 +23,43 @@ $participant = $auth->requireAuth();
 // execution only reaches here with a valid, authenticated $participant.
 
 // ============================================================
-// NEW: Response signing.
+// NEW: Response signing via CertificateManager('CAZACOM').
 //
-// Previously CAZACOM never signed any response — confirmed by
-// hold_transactions.signature_chain showing "signature": null for
-// every CAZACOM hold. This was invisible for single-source swaps
-// (nothing checked for it) but broke multi-source pools, where
+// This is the SAME class ZURUBANK and SACCUSSALIS already use
+// successfully (confirmed by their hold.php responses returning
+// "signature_verified": true) — just instantiated with CAZACOM's own
+// identity instead. CAZACOM's own certificate/key were provisioned
+// against VouchMorph's real Root CA (verified: openssl verify
+// -CAfile ca_cert.pem cazacom_certificate.pem -> OK).
+//
+// Root cause this fixes: CAZACOM never signed any response — confirmed
+// by hold_transactions.signature_chain showing "signature": null for
+// every CAZACOM hold. Invisible for single-source swaps (nothing
+// checked for it); fatal for multi-source pools, where
 // AggregateSigner::signAggregate() requires a valid signature from
-// EVERY contributing institution and fails the whole pool with
-// "Invalid signature from: CAZACOM" when one is missing.
+// EVERY contributing institution and previously failed the whole
+// pool with "Invalid signature from: CAZACOM".
 //
-// TODO (ops/deploy): CAZACOM_SIGNING_KEY_PATH and
-// CAZACOM_SIGNING_CERT_PATH must point at securely-deployed files —
-// NEVER paths inside the git repo, NEVER the private key committed
-// anywhere. Wire these through whatever secrets mechanism this
-// deployment already uses for other credentials (this file's own
-// DB connection is a reasonable model to follow).
-//
-// TODO (cross-team): the certificate at CAZACOM_SIGNING_CERT_PATH
-// must be registered in VouchMorph's SignatureVerifier trust store
-// before this will actually verify successfully on their side. Until
-// that happens, responses will carry a real signature but
-// VouchMorph will reject it as untrusted rather than missing —
-// progress, but not the finish line. Coordinate with whoever owns
-// participants.yaml / the trust store on that side.
+// CertificateManager reads its key/cert from env vars named after
+// the partner name passed to its constructor:
+//   CAZACOM_PRIVATE_KEY_CONTENT
+//   CAZACOM_CERT_CONTENT
+// Set both on this service in Railway before deploying this file.
+// isConfigured() below fails loudly rather than silently sending an
+// unsigned response if those aren't set correctly.
 // ============================================================
-$signer = new CazacomResponseSigner(
-    getenv('CAZACOM_SIGNING_KEY_PATH') ?: '/etc/cazacom/secrets/cazacom_private_key.pem',
-    getenv('CAZACOM_SIGNING_CERT_PATH') ?: '/etc/cazacom/config/cazacom_certificate.pem'
-);
+$certManager = new CertificateManager('CAZACOM');
+if (!$certManager->isConfigured()) {
+    error_log("[CAZACOM hold.php] CertificateManager not configured - missing CA cert / CAZACOM private key / CAZACOM certificate env vars");
+    http_response_code(500);
+    echo json_encode([
+        'success' => false,
+        'status' => 'error',
+        'message' => 'Signing not configured on this server',
+        'hold_placed' => false
+    ]);
+    exit;
+}
 
 // ============================================================
 // FIX: was `if (!in_array('initiate_payment', $client['scopes']))`.
@@ -174,17 +183,15 @@ try {
         "message" => "Hold placed successfully",
     ];
 
-    // NEW: sign the response so multi-source pool assembly on
-    // VouchMorph's side (AggregateSigner/SignatureVerifier) can
-    // validate CAZACOM's hold the same way it already validates
-    // ZURUBANK's and SACCUSSALIS's.
-    $signed = $signer->sign($responseBody);
-    $responseBody['signature'] = $signed['signature'];
-    $responseBody['certificate'] = $signed['certificate'];
-    $responseBody['timestamp'] = $signed['timestamp'];
-    $responseBody['verification_method'] = 'certificate';
+    // NEW: sign the response using CAZACOM's own certificate/key,
+    // via the same CertificateManager class ZURUBANK/SACCUSSALIS use.
+    // createSignedRequest() adds 'signature', 'certificate', and
+    // 'timestamp' fields, and appends 'requester' AFTER signing (it
+    // is deliberately excluded from the signed payload itself — see
+    // CertificateManager::createSignedRequest()'s own docblock).
+    $signedResponse = $certManager->createSignedRequest($responseBody, 'CAZACOM');
 
-    echo json_encode($responseBody);
+    echo json_encode($signedResponse);
 } catch (Exception $e) {
     $db->rollBack();
     echo json_encode([
