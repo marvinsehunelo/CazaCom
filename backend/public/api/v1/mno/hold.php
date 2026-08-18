@@ -48,7 +48,26 @@ $participant = $auth->requireAuth();
 
 $input = json_decode(file_get_contents("php://input"), true);
 $reference = $input['reference'] ?? null;
-$assetId = $input['asset_id'] ?? null;
+
+// ============================================================
+// FIX: was `$input['asset_id'] ?? null` — GenericBankClient never
+// sends a field called 'asset_id'. addSourceIdentifier() populates
+// 'source_identifier', 'wallet_phone', 'phone', 'national_id',
+// 'email', and 'account_number' — never 'asset_id'. Every real hold
+// request therefore looked up a null phone number and failed with
+// "User not found", even though verify_wallet.php (which correctly
+// reads 'source_identifier'/'phone') found the exact same wallet
+// moments earlier in the same swap trace. Now checks the field names
+// GenericBankClient actually populates, preferring 'source_identifier'
+// first, with 'asset_id' kept as a last-resort fallback for any
+// caller that does send it directly.
+// ============================================================
+$assetId = $input['source_identifier']
+    ?? $input['phone']
+    ?? $input['wallet_phone']
+    ?? $input['asset_id']
+    ?? null;
+
 $amount = (float)($input['amount'] ?? 0);
 $expiry = $input['expiry'] ?? date('Y-m-d H:i:s', strtotime('+24 hours'));
 $accessToken = $input['access_token'] ?? null;
