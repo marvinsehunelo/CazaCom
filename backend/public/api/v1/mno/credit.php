@@ -15,12 +15,26 @@ if (!$db) {
     exit;
 }
 $auth = new ApiAuthenticator($db);
-$participant = $auth->requireAuth(); 
-if (!in_array('initiate_payment', $client['scopes'])) {
-    http_response_code(403);
-    echo json_encode(['success' => false, 'error' => 'insufficient_scope', 'message' => 'initiate_payment scope required']);
-    exit;
-}
+$participant = $auth->requireAuth();
+// requireAuth() already sends a 401 and exit()s internally on failure —
+// execution only reaches here with a valid, authenticated $participant.
+
+// ============================================================
+// FIX: was `if (!in_array('initiate_payment', $client['scopes']))`.
+// Same leftover-variable bug as hold.php — $client was never defined
+// in this version of the file, a holdover from before this endpoint
+// was switched from `authenticate()` to `requireAuth()`. See
+// hold.php's matching fix for the full explanation. requireAuth() in
+// the current ApiAuthenticator returns only a participant name, no
+// scopes list, so there is no real data here to check against.
+// Disabled with a TODO rather than fabricated — see hold.php's
+// identical comment for the design question this leaves open.
+// ============================================================
+// TODO: no scope enforcement currently possible — ApiAuthenticator::requireAuth()
+// returns only a participant name, not a scopes list. Restore a real
+// check here once scopes are modeled, or confirm scope enforcement is
+// intentionally not required for this endpoint.
+
 $input = json_decode(file_get_contents("php://input"), true);
 $reference = $input['reference'] ?? null;
 $destinationId = $input['destination_id'] ?? null;
