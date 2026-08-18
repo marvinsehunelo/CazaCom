@@ -27,7 +27,7 @@ declare(strict_types=1);
  * everything in mtn_wallets/mtn_collections/mtn_transfers, or actually
  * calls MTN's Disbursement + Collection sandbox/production APIs.
  *
- * FIX (this revision): the 'wallet_balance' action read
+ * FIX (previous revision): the 'wallet_balance' action read
  * $input['msisdn'], a field that is never actually sent by
  * VouchMorph's GenericBankClient — it sends 'source_identifier'
  * (plus aliases 'phone', 'wallet_phone', 'account_number', etc via
@@ -38,6 +38,32 @@ declare(strict_types=1);
  * all of which have real, non-zero balances in mtn_wallets. The
  * lookup itself (getWalletBalanceAction) was always correct; only the
  * field name pulled from $input was wrong.
+ *
+ * ============================================================
+ * FIX (THIS revision): missing top-level 'success' key.
+ * ============================================================
+ * GenericBankClient::send() derives pass/fail for a response using an
+ * ELSEIF chain: it checks 'success' first, THEN 'status' (must equal
+ * the literal string "SUCCESS"), THEN — only for place_hold — the
+ * action-specific 'hold_placed' flag. Every response below used to
+ * set 'status' => 'ACTIVE' (or similar) alongside a correct
+ * 'hold_placed'/'debited'/'released'/'credited' flag, but because
+ * 'status' was checked BEFORE the action-specific flag, and 'ACTIVE'
+ * !== 'SUCCESS', every one of these calls was reported as a FAILURE
+ * by the shared client — even though MTN's own message plainly said
+ * it succeeded. Confirmed live: "Hold failed: Collection approved
+ * (simulated) — funds held".
+ *
+ * debitFunds()/releaseHold()/processDeposit() had NO success/status
+ * signal at all and were only passing because GenericBankClient::send()
+ * defaults an unrecognized response to success=true. That fail-open
+ * default is being tightened on the VouchMorph side, so these MUST
+ * carry an explicit signal now or they will start failing outright.
+ *
+ * Every response below now sets 'success' => true|false explicitly,
+ * which is checked FIRST in GenericBankClient::send() and can no
+ * longer be shadowed by a 'status' string that doesn't happen to
+ * equal "SUCCESS".
  */
 
 require_once __DIR__ . '/../../config/db.php';
@@ -107,14 +133,6 @@ class MtnMomoParticipant
             'check_status' => $this->checkStatus($input['reference'] ?? ''),
             'initiate_cashout' => $this->initiateAgentCashout($input),
             'confirm_cashout' => $this->confirmAgentCashout($input),
-            // FIX: was $input['msisdn'] ?? '' — that key is never sent
-            // by GenericBankClient. It sends 'source_identifier' plus
-            // aliases 'phone'/'wallet_phone'/'account_number'/etc, but
-            // never literally 'msisdn'. Every real balance check was
-            // therefore looking up an empty string. Now checks all the
-            // field names GenericBankClient::addSourceIdentifier()
-            // actually populates, still preferring 'msisdn' first for
-            // any caller that does send it directly.
             'wallet_balance' => $this->getWalletBalanceAction(
                 $input['msisdn']
                     ?? $input['source_identifier']
@@ -198,6 +216,9 @@ class MtnMomoParticipant
             $hasSufficientBalance = (float)$wallet['balance'] >= $amount;
 
             return [
+                // FIX: was missing — 'success' is checked first by
+                // GenericBankClient::send() and must reflect whether the
+                // wallet is actually verified/active, same value as 'verified'.
                 'success' => $active,
                 'verified' => $active,
                 'balance' => (float)$wallet['balance'],
@@ -224,11 +245,7 @@ class MtnMomoParticipant
         $referenceId = 'MTNCOLL_' . ($payload['reference'] ?? uniqid());
 
         if (!$msisdn || $amount <= 0) {
-            return [
-                'success' => false,
-                'hold_placed' => false,
-                'message' => 'source_identifier and amount required'
-            ];
+            return ['success' => false, 'hold_placed' => false, 'message' => 'source_identifier and amount required'];
         }
 
         // Idempotency: same reference already has a collection record
@@ -260,11 +277,7 @@ class MtnMomoParticipant
                 if (!$wallet || (float)$wallet['balance'] < $amount) {
                     $this->db->prepare("UPDATE mtn_collections SET status = 'FAILED' WHERE reference_id = ?")->execute([$referenceId]);
                     $this->db->commit();
-                    return [
-                        'success' => false,
-                        'hold_placed' => false,
-                        'message' => 'Insufficient MTN wallet balance'
-                    ];
+                    return ['success' => false, 'hold_placed' => false, 'message' => 'Insufficient MTN wallet balance'];
                 }
 
                 $this->db->prepare("UPDATE mtn_wallets SET balance = balance - ? WHERE wallet_id = ?")
@@ -275,11 +288,14 @@ class MtnMomoParticipant
                 $this->db->commit();
 
                 return [
-                    // FIX: was missing this key — this exact message
-                    // ("Collection approved (simulated) — funds held")
-                    // is the literal text seen in the "Hold failed: ..."
-                    // contradiction this session. Same root cause as
-                    // absa_participant.php and CAZACOM's hold.php.
+                    // FIX: was missing — this exact response
+                    // ("Collection approved (simulated) — funds held") is
+                    // the confirmed cause of the false "Hold failed"
+                    // reports: 'status' => 'ACTIVE' was being read by
+                    // GenericBankClient::send() BEFORE 'hold_placed', and
+                    // 'ACTIVE' !== 'SUCCESS' made the whole call look
+                    // failed. 'success' is checked first and fixes this
+                    // regardless of the status-string ordering issue.
                     'success' => true,
                     'hold_placed' => true,
                     'hold_reference' => $referenceId,
@@ -289,11 +305,7 @@ class MtnMomoParticipant
                 ];
             } catch (Exception $e) {
                 $this->db->rollBack();
-                return [
-                    'success' => false,
-                    'hold_placed' => false,
-                    'message' => 'Collection failed: ' . $e->getMessage()
-                ];
+                return ['success' => false, 'hold_placed' => false, 'message' => 'Collection failed: ' . $e->getMessage()];
             }
         }
 
@@ -301,11 +313,7 @@ class MtnMomoParticipant
         // number of times (NOT indefinitely — see class docblock).
         $submitted = $this->remoteInitiateCollection($referenceId, $msisdn, $amount, $currency, $payload);
         if (!$submitted) {
-            return [
-                'success' => false,
-                'hold_placed' => false,
-                'message' => 'Failed to submit collection request to MTN'
-            ];
+            return ['success' => false, 'hold_placed' => false, 'message' => 'Failed to submit collection request to MTN'];
         }
 
         $maxAttempts = (int)(getenv('MTN_COLLECTION_POLL_ATTEMPTS') ?: 5);
@@ -319,21 +327,17 @@ class MtnMomoParticipant
                 $this->db->prepare("UPDATE mtn_collections SET status = 'SUCCESSFUL', completed_at = NOW() WHERE reference_id = ?")
                     ->execute([$referenceId]);
                 return [
-                    // FIX: added success key for remote poll success branch
+                    // FIX: same missing 'success' key as the LOCAL branch above.
                     'success' => true,
                     'hold_placed' => true,
                     'hold_reference' => $referenceId,
                     'status' => 'ACTIVE',
-                    'message' => 'Collection approved by customer'
+                    'message' => 'Collection approved by customer',
                 ];
             }
             if ($status === 'FAILED') {
                 $this->db->prepare("UPDATE mtn_collections SET status = 'FAILED' WHERE reference_id = ?")->execute([$referenceId]);
-                return [
-                    'success' => false,
-                    'hold_placed' => false,
-                    'message' => 'Customer rejected or collection failed'
-                ];
+                return ['success' => false, 'hold_placed' => false, 'message' => 'Customer rejected or collection failed'];
             }
             // still PENDING — keep polling within the bounded window
         }
@@ -343,11 +347,7 @@ class MtnMomoParticipant
         // this state — it will be treated as a hold failure. Flagging
         // this as the real architectural gap described in the class docblock.
         error_log("[MTN MoMo] Collection {$referenceId} still PENDING after {$maxAttempts} poll attempts — customer has not approved in time. This needs async/webhook support in SwapService to handle correctly.");
-        return [
-            'success' => false,
-            'hold_placed' => false,
-            'message' => 'Customer has not approved the collection request in time. They may still approve it later — this swap cannot proceed synchronously.'
-        ];
+        return ['success' => false, 'hold_placed' => false, 'message' => 'Customer has not approved the collection request in time. They may still approve it later — this swap cannot proceed synchronously.'];
     }
 
     /**
@@ -360,11 +360,7 @@ class MtnMomoParticipant
     {
         $referenceId = $payload['hold_reference'] ?? $payload['reference'] ?? null;
         if (!$referenceId) {
-            return [
-                'success' => false,
-                'debited' => false,
-                'message' => 'hold_reference required'
-            ];
+            return ['success' => false, 'debited' => false, 'message' => 'hold_reference required'];
         }
 
         $stmt = $this->db->prepare("SELECT * FROM mtn_collections WHERE reference_id = ?");
@@ -372,22 +368,18 @@ class MtnMomoParticipant
         $collection = $stmt->fetch(PDO::FETCH_ASSOC);
 
         if (!$collection) {
-            return [
-                'success' => false,
-                'debited' => false,
-                'message' => 'Collection not found'
-            ];
+            return ['success' => false, 'debited' => false, 'message' => 'Collection not found'];
         }
         if ($collection['status'] !== 'SUCCESSFUL') {
-            return [
-                'success' => false,
-                'debited' => false,
-                'message' => "Collection status is {$collection['status']}, cannot finalize"
-            ];
+            return ['success' => false, 'debited' => false, 'message' => "Collection status is {$collection['status']}, cannot finalize"];
         }
 
         return [
-            // FIX: added success key — debit success return had no signal at all
+            // FIX: this response had NO success/status signal at all —
+            // it was only ever passing because GenericBankClient::send()
+            // defaults an unrecognized response body to success=true.
+            // That fail-open default is being removed on the VouchMorph
+            // side, so this key is now required, not optional.
             'success' => true,
             'debited' => true,
             'transaction_reference' => $referenceId,
@@ -407,11 +399,7 @@ class MtnMomoParticipant
     {
         $referenceId = $payload['hold_reference'] ?? null;
         if (!$referenceId) {
-            return [
-                'success' => false,
-                'released' => false,
-                'message' => 'hold_reference required'
-            ];
+            return ['success' => false, 'released' => false, 'message' => 'hold_reference required'];
         }
 
         $stmt = $this->db->prepare("SELECT * FROM mtn_collections WHERE reference_id = ?");
@@ -419,21 +407,13 @@ class MtnMomoParticipant
         $collection = $stmt->fetch(PDO::FETCH_ASSOC);
 
         if (!$collection) {
-            return [
-                'success' => false,
-                'released' => false,
-                'message' => 'Collection not found'
-            ];
+            return ['success' => false, 'released' => false, 'message' => 'Collection not found'];
         }
         if ($collection['status'] !== 'SUCCESSFUL') {
             // Nothing to reverse — never actually collected, or already cancelled.
             $this->db->prepare("UPDATE mtn_collections SET status = 'CANCELLED' WHERE reference_id = ?")->execute([$referenceId]);
-            // FIX: added success key to release hold success branch
-            return [
-                'success' => true,
-                'released' => true,
-                'message' => 'Collection was not yet successful — marked cancelled, no reversal needed'
-            ];
+            // FIX: was missing 'success' key.
+            return ['success' => true, 'released' => true, 'message' => 'Collection was not yet successful — marked cancelled, no reversal needed'];
         }
 
         $this->db->beginTransaction();
@@ -450,19 +430,11 @@ class MtnMomoParticipant
             $this->db->prepare("UPDATE mtn_collections SET status = 'CANCELLED' WHERE reference_id = ?")->execute([$referenceId]);
             $this->db->commit();
 
-            // FIX: added success key to release hold success branch
-            return [
-                'success' => true,
-                'released' => true,
-                'message' => 'Collection reversed, customer refunded'
-            ];
+            // FIX: was missing 'success' key.
+            return ['success' => true, 'released' => true, 'message' => 'Collection reversed, customer refunded'];
         } catch (Exception $e) {
             $this->db->rollBack();
-            return [
-                'success' => false,
-                'released' => false,
-                'message' => 'Release failed: ' . $e->getMessage()
-            ];
+            return ['success' => false, 'released' => false, 'message' => 'Release failed: ' . $e->getMessage()];
         }
     }
 
@@ -587,13 +559,13 @@ class MtnMomoParticipant
         $referenceId = 'MTNXFER_' . ($payload['reference'] ?? uniqid());
 
         if (!$msisdn || $amount <= 0) {
-            return ['credited' => false, 'message' => 'destination_identifier and amount required'];
+            return ['success' => false, 'credited' => false, 'message' => 'destination_identifier and amount required'];
         }
 
         $stmt = $this->db->prepare("SELECT * FROM mtn_transfers WHERE reference_id = ?");
         $stmt->execute([$referenceId]);
         if ($existing = $stmt->fetch(PDO::FETCH_ASSOC)) {
-            return ['credited' => true, 'transaction_reference' => $referenceId, 'message' => 'Duplicate reference — already processed', 'data' => $existing];
+            return ['success' => true, 'credited' => true, 'transaction_reference' => $referenceId, 'message' => 'Duplicate reference — already processed', 'data' => $existing];
         }
 
         if ($this->sandboxMode) {
@@ -618,17 +590,11 @@ class MtnMomoParticipant
                 $transfer = $stmt->fetch(PDO::FETCH_ASSOC);
 
                 $this->db->commit();
-                return [
-                    // FIX: added success key to LOCAL sandbox success branch
-                    'success' => true,
-                    'credited' => true,
-                    'transaction_reference' => $referenceId,
-                    'message' => 'Deposit successful',
-                    'data' => $transfer
-                ];
+                // FIX: was missing 'success' key.
+                return ['success' => true, 'credited' => true, 'transaction_reference' => $referenceId, 'message' => 'Deposit successful', 'data' => $transfer];
             } catch (Exception $e) {
                 $this->db->rollBack();
-                return ['credited' => false, 'message' => 'Deposit failed: ' . $e->getMessage()];
+                return ['success' => false, 'credited' => false, 'message' => 'Deposit failed: ' . $e->getMessage()];
             }
         }
 
@@ -638,7 +604,7 @@ class MtnMomoParticipant
     private function remoteDisbursementTransfer(string $referenceId, string $msisdn, float $amount, string $currency, array $payload): array
     {
         $token = $this->getDisbursementToken();
-        if (!$token) return ['credited' => false, 'message' => 'Could not obtain MTN Disbursement token'];
+        if (!$token) return ['success' => false, 'credited' => false, 'message' => 'Could not obtain MTN Disbursement token'];
 
         $body = json_encode([
             'amount' => (string)$amount,
@@ -674,7 +640,7 @@ class MtnMomoParticipant
         ");
         $stmt->execute([$referenceId, $msisdn, $amount, $currency, $status]);
 
-        return ['credited' => $httpCode === 202, 'transaction_reference' => $referenceId, 'message' => "MTN responded HTTP {$httpCode}"];
+        return ['success' => $httpCode === 202, 'credited' => $httpCode === 202, 'transaction_reference' => $referenceId, 'message' => "MTN responded HTTP {$httpCode}"];
     }
 
     private function getDisbursementToken(): ?string
