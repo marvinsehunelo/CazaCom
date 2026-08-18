@@ -3,7 +3,9 @@
 header("Content-Type: application/json; charset=utf-8");
 require_once __DIR__ . '/../../../../config/db.php';
 require_once __DIR__ . '/../../../../security/ApiAuthenticator.php';
+require_once __DIR__ . '/../../../../security/CazacomResponseSigner.php';
 use Security\ApiAuthenticator;
+
 // FIX: was `new PDO(getenv('DATABASE_URL'))` — not a valid PDO DSN.
 // Single Database connection reused for both auth and the queries
 // below, same as debit.php / credit.php.
@@ -18,6 +20,37 @@ $auth = new ApiAuthenticator($db);
 $participant = $auth->requireAuth();
 // requireAuth() already sends a 401 and exit()s internally on failure —
 // execution only reaches here with a valid, authenticated $participant.
+
+// ============================================================
+// NEW: Response signing.
+//
+// Previously CAZACOM never signed any response — confirmed by
+// hold_transactions.signature_chain showing "signature": null for
+// every CAZACOM hold. This was invisible for single-source swaps
+// (nothing checked for it) but broke multi-source pools, where
+// AggregateSigner::signAggregate() requires a valid signature from
+// EVERY contributing institution and fails the whole pool with
+// "Invalid signature from: CAZACOM" when one is missing.
+//
+// TODO (ops/deploy): CAZACOM_SIGNING_KEY_PATH and
+// CAZACOM_SIGNING_CERT_PATH must point at securely-deployed files —
+// NEVER paths inside the git repo, NEVER the private key committed
+// anywhere. Wire these through whatever secrets mechanism this
+// deployment already uses for other credentials (this file's own
+// DB connection is a reasonable model to follow).
+//
+// TODO (cross-team): the certificate at CAZACOM_SIGNING_CERT_PATH
+// must be registered in VouchMorph's SignatureVerifier trust store
+// before this will actually verify successfully on their side. Until
+// that happens, responses will carry a real signature but
+// VouchMorph will reject it as untrusted rather than missing —
+// progress, but not the finish line. Coordinate with whoever owns
+// participants.yaml / the trust store on that side.
+// ============================================================
+$signer = new CazacomResponseSigner(
+    getenv('CAZACOM_SIGNING_KEY_PATH') ?: '/etc/cazacom/secrets/cazacom_private_key.pem',
+    getenv('CAZACOM_SIGNING_CERT_PATH') ?: '/etc/cazacom/config/cazacom_certificate.pem'
+);
 
 // ============================================================
 // FIX: was `if (!in_array('initiate_payment', $client['scopes']))`.
@@ -117,7 +150,8 @@ try {
     ");
     $stmt->execute(['amount' => $amount, 'user_id' => $user['id']]);
     $db->commit();
-    echo json_encode([
+
+    $responseBody = [
         // FIX: was missing a top-level 'success' boolean — same gap
         // found and fixed in credit.php, and (per the same pattern
         // confirmed independently in absa_participant.php's and
@@ -137,8 +171,20 @@ try {
         "hold_expiry" => $expiry,
         "amount_held" => $amount,
         "available_balance" => $availableBalance - $amount,
-        "message" => "Hold placed successfully"
-    ]);
+        "message" => "Hold placed successfully",
+    ];
+
+    // NEW: sign the response so multi-source pool assembly on
+    // VouchMorph's side (AggregateSigner/SignatureVerifier) can
+    // validate CAZACOM's hold the same way it already validates
+    // ZURUBANK's and SACCUSSALIS's.
+    $signed = $signer->sign($responseBody);
+    $responseBody['signature'] = $signed['signature'];
+    $responseBody['certificate'] = $signed['certificate'];
+    $responseBody['timestamp'] = $signed['timestamp'];
+    $responseBody['verification_method'] = 'certificate';
+
+    echo json_encode($responseBody);
 } catch (Exception $e) {
     $db->rollBack();
     echo json_encode([
