@@ -89,16 +89,33 @@ try {
     $stmt->execute(['user_id' => $hold['user_id']]);
     // Record transaction
     $transactionRef = 'TX-' . time() . '-' . bin2hex(random_bytes(8));
+    // ============================================================
+    // FIX: was inserting a 'destination' column that does not exist
+    // on mobile_money_transactions. Real schema: id, user_id, type,
+    // amount, fee, reference, recipient_phone, network, status,
+    // wallet_type, created_at, completed_at — no destination column.
+    // Every real debit through this file failed with SQLSTATE[42703]
+    // AFTER the destination had already been credited (confirmed by
+    // the "Debit failed after destination delivery succeeded" wrapper
+    // message this produced upstream in SwapService) — meaning the
+    // source hold was correctly left un-released and flagged for
+    // manual reconciliation rather than double-paid, but the debit
+    // itself never actually completed here.
+    //
+    // No data is lost by dropping this column reference: the full
+    // $destinationDetails JSON is already persisted a few lines above,
+    // in the `financial_holds.destination` UPDATE — this INSERT's copy
+    // was redundant, not the only record of it.
+    // ============================================================
     $stmt = $db->prepare("
         INSERT INTO mobile_money_transactions
-        (user_id, type, amount, reference, status, completed_at, destination)
-        VALUES (:user_id, 'debit', :amount, :ref, 'completed', NOW(), :dest)
+        (user_id, type, amount, reference, status, completed_at)
+        VALUES (:user_id, 'debit', :amount, :ref, 'completed', NOW())
     ");
     $stmt->execute([
         'user_id' => $hold['user_id'],
         'amount' => $hold['amount'],
-        'ref' => $transactionRef,
-        'dest' => json_encode($destinationDetails)
+        'ref' => $transactionRef
     ]);
     $db->commit();
     echo json_encode([
