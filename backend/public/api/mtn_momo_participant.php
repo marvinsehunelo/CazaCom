@@ -27,46 +27,46 @@ declare(strict_types=1);
  * everything in mtn_wallets/mtn_collections/mtn_transfers, or actually
  * calls MTN's Disbursement + Collection sandbox/production APIs.
  *
- * FIX (previous revision): the 'wallet_balance' action read
- * $input['msisdn'], a field that is never actually sent by
- * VouchMorph's GenericBankClient — it sends 'source_identifier'
- * (plus aliases 'phone', 'wallet_phone', 'account_number', etc via
- * addSourceIdentifier(), but never 'msisdn'). Every real balance
- * check therefore looked up an empty string and returned "Wallet not
- * found" regardless of whether the MSISDN actually existed in
- * mtn_wallets — confirmed live for +26779000000 through +26779000004,
- * all of which have real, non-zero balances in mtn_wallets. The
- * lookup itself (getWalletBalanceAction) was always correct; only the
- * field name pulled from $input was wrong.
- *
  * ============================================================
- * FIX (THIS revision): missing top-level 'success' key.
+ * FIX (THIS revision): placeHold() responses are now SIGNED.
  * ============================================================
- * GenericBankClient::send() derives pass/fail for a response using an
- * ELSEIF chain: it checks 'success' first, THEN 'status' (must equal
- * the literal string "SUCCESS"), THEN — only for place_hold — the
- * action-specific 'hold_placed' flag. Every response below used to
- * set 'status' => 'ACTIVE' (or similar) alongside a correct
- * 'hold_placed'/'debited'/'released'/'credited' flag, but because
- * 'status' was checked BEFORE the action-specific flag, and 'ACTIVE'
- * !== 'SUCCESS', every one of these calls was reported as a FAILURE
- * by the shared client — even though MTN's own message plainly said
- * it succeeded. Confirmed live: "Hold failed: Collection approved
- * (simulated) — funds held".
+ * Root cause: MTN never signed any response at all — no signature,
+ * no certificate, on any endpoint. Invisible for single-source swaps
+ * (nothing checks for it); fatal for multi-source pools, where
+ * AggregateSigner::verifySourceSignatures() requires a valid
+ * certificate + signature from EVERY contributing institution and
+ * throws "Missing certificate or signature from source: MTN"
+ * otherwise (surfaced up through PoolCoordinator as
+ * "Invalid signature from: MTN" once CAZACOM's own equivalent gap
+ * was fixed and MTN became the next contributor actually reached).
  *
- * debitFunds()/releaseHold()/processDeposit() had NO success/status
- * signal at all and were only passing because GenericBankClient::send()
- * defaults an unrecognized response to success=true. That fail-open
- * default is being tightened on the VouchMorph side, so these MUST
- * carry an explicit signal now or they will start failing outright.
+ * This file is deployed on Cazacom's own infrastructure (see class
+ * docblock above), so rather than issue MTN a separate certificate,
+ * this reuses Cazacom's own certificate/private key
+ * (CAZACOM_PRIVATE_KEY_CONTENT / CAZACOM_CERT_CONTENT — already
+ * configured and working) via the same CertificateManager class
+ * hold.php already uses successfully. No new certificate, no new
+ * env vars.
  *
- * Every response below now sets 'success' => true|false explicitly,
- * which is checked FIRST in GenericBankClient::send() and can no
- * longer be shadowed by a 'status' string that doesn't happen to
- * equal "SUCCESS".
+ * NOTE ON TRUST MODEL: AggregateSigner::verifySourceSignatures()
+ * extracts the public key directly from whatever certificate arrives
+ * with a contributor's hold response — it does not check that the
+ * certificate's identity (CN=CAZACOM) matches the institution field
+ * on the hold (MTN). This means MTN's contribution is not
+ * cryptographically distinct from CAZACOM's; it is, structurally,
+ * CAZACOM signing on MTN's behalf. Acceptable here since MTN's
+ * implementation in this file is explicitly simulated
+ * ('Collection approved (simulated)') and lives inside CAZACOM's own
+ * deployment — but if MTN is ever split into its own real service, it
+ * should get its own certificate the same way CAZACOM did, not
+ * continue borrowing CAZACOM's.
+ * ============================================================
  */
 
 require_once __DIR__ . '/../../config/db.php';
+require_once __DIR__ . '/../../helpers/Crypto/CertificateManager.php';
+
+use helpers\Crypto\CertificateManager;
 
 header('Content-Type: application/json');
 
@@ -74,6 +74,7 @@ class MtnMomoParticipant
 {
     private PDO $db;
     private bool $sandboxMode;
+    private ?CertificateManager $certManager = null;
 
     // Disbursement credentials
     private ?string $disbSubscriptionKey;
@@ -105,6 +106,20 @@ class MtnMomoParticipant
         $this->collApiKey = getenv('MTN_COLLECTION_API_KEY') ?: null;
 
         $this->baseUrl = getenv('MTN_BASE_URL') ?: 'https://sandbox.momodeveloper.mtn.com';
+
+        // FIX: reuse Cazacom's own certificate/key — this file runs on
+        // Cazacom's infrastructure, so CAZACOM_PRIVATE_KEY_CONTENT /
+        // CAZACOM_CERT_CONTENT are already present and working (see
+        // hold.php). No separate MTN certificate needed.
+        try {
+            $this->certManager = new CertificateManager('CAZACOM');
+            if (!$this->certManager->isConfigured()) {
+                error_log("[MTN MoMo] WARNING: CertificateManager not configured (missing CA cert / CAZACOM key / CAZACOM cert env vars) - hold responses will NOT be signed, multi-source pools involving MTN will fail signature verification");
+            }
+        } catch (\Throwable $e) {
+            error_log("[MTN MoMo] CertificateManager init failed: " . $e->getMessage());
+            $this->certManager = null;
+        }
     }
 
     // ============================================================
@@ -287,7 +302,7 @@ class MtnMomoParticipant
 
                 $this->db->commit();
 
-                return [
+                $responseBody = [
                     // FIX: was missing — this exact response
                     // ("Collection approved (simulated) — funds held") is
                     // the confirmed cause of the false "Hold failed"
@@ -303,6 +318,21 @@ class MtnMomoParticipant
                     'message' => 'Collection approved (simulated) — funds held',
                     'data' => [],
                 ];
+
+                // FIX: sign the response so multi-source pool assembly
+                // (AggregateSigner::verifySourceSignatures()) can verify
+                // MTN's contribution the same way it already verifies
+                // ZURUBANK/SACCUSSALIS/CAZACOM. See class docblock for
+                // why this reuses Cazacom's certificate rather than a
+                // separate MTN one.
+                if ($this->certManager && $this->certManager->isConfigured()) {
+                    $signed = $this->certManager->createSignedRequest($responseBody, 'MTN');
+                    return $signed;
+                }
+
+                error_log("[MTN MoMo] placeHold: CertificateManager unavailable - returning UNSIGNED response. Multi-source pools including MTN will fail signature verification.");
+                return $responseBody;
+
             } catch (Exception $e) {
                 $this->db->rollBack();
                 return ['success' => false, 'hold_placed' => false, 'message' => 'Collection failed: ' . $e->getMessage()];
@@ -326,7 +356,8 @@ class MtnMomoParticipant
             if ($status === 'SUCCESSFUL') {
                 $this->db->prepare("UPDATE mtn_collections SET status = 'SUCCESSFUL', completed_at = NOW() WHERE reference_id = ?")
                     ->execute([$referenceId]);
-                return [
+
+                $responseBody = [
                     // FIX: same missing 'success' key as the LOCAL branch above.
                     'success' => true,
                     'hold_placed' => true,
@@ -334,6 +365,13 @@ class MtnMomoParticipant
                     'status' => 'ACTIVE',
                     'message' => 'Collection approved by customer',
                 ];
+
+                // FIX: sign here too, same as the LOCAL branch.
+                if ($this->certManager && $this->certManager->isConfigured()) {
+                    return $this->certManager->createSignedRequest($responseBody, 'MTN');
+                }
+                error_log("[MTN MoMo] placeHold (REMOTE): CertificateManager unavailable - returning UNSIGNED response.");
+                return $responseBody;
             }
             if ($status === 'FAILED') {
                 $this->db->prepare("UPDATE mtn_collections SET status = 'FAILED' WHERE reference_id = ?")->execute([$referenceId]);
