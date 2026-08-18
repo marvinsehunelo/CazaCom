@@ -22,8 +22,38 @@ class KeyVault
     
     private function __construct()
     {
-        // Get database connection
-        $this->db = getDbConnection();
+        // ============================================================
+        // FIX: getDbConnection() does not exist anywhere in this
+        // codebase. config/db.php defines an unnamespaced `Database`
+        // class (instantiated as `new Database()` -> ->getConnection(),
+        // the same pattern hold.php/credit.php/debit.php already use
+        // successfully) and a `getDB()` functional wrapper — never a
+        // bare `getDbConnection()` function. Since this file lives in
+        // namespace Security\Encryption, the old unqualified call was
+        // resolving to Security\Encryption\getDbConnection(), which
+        // has never existed, causing an uncaught fatal Error the
+        // moment ApiAuthenticator (and therefore every Cazacom
+        // endpoint that authenticates via ApiAuthenticator — hold.php,
+        // credit.php, debit.php) tried to construct a KeyVault. The
+        // fatal happened before any JSON response was emitted, which
+        // is why callers upstream (GenericBankClient) saw an empty/
+        // unparseable body and fell back to their own generic
+        // "Hold failed"/"Deposit failed" text instead of a real error
+        // message — confirmed live via:
+        //   Uncaught Error: Call to undefined function
+        //   Security\Encryption\getDbConnection() in
+        //   /app/security/KeyVault.php:26
+        //
+        // `Database` is declared with no namespace (global), so it
+        // must be referenced with a leading backslash from inside
+        // this namespaced class.
+        // ============================================================
+        $database = new \Database();
+        $this->db = $database->getConnection();
+
+        if (!$this->db) {
+            error_log("KeyVault: Database connection failed via Database::getConnection()");
+        }
         
         // Get encryption key from Railway vault
         $this->encryptionKey = getenv('ENCRYPTION_KEY');
