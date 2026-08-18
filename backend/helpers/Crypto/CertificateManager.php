@@ -121,6 +121,30 @@ class CertificateManager
      * CRITICAL: DO NOT include 'requester' in the signed payload.
      * Saccussalis and ZuruBank remove 'requester' before verification,
      * so it must NOT be part of the signed data.
+     *
+     * ============================================================
+     * FIX: added 'original_payload' to the returned array.
+     * ============================================================
+     * Root cause of "Invalid signature from: CAZACOM" during
+     * multi-source pool assembly: AggregateSigner::verifySourceSignatures()
+     * (on VouchMorph's side) re-verifies each contributor's signature
+     * against $hold['original_payload'], which SwapService::placeHoldSigned()
+     * populates via `$result['original_payload'] ?? $holdPayload`. Since
+     * this method's return value never contained an 'original_payload'
+     * key, that fallback ALWAYS resolved to $holdPayload — the PLACE_HOLD
+     * REQUEST VouchMorph sent — instead of the response this method
+     * actually signed. A signature can never verify against the wrong
+     * document, regardless of how correctly it was generated, so every
+     * CAZACOM (and MTN, which has the same gap) contribution to a
+     * multi-source pool failed deterministically.
+     *
+     * Now explicitly returns the exact payload that was signed (post-
+     * timestamp-merge, pre-signature) under 'original_payload', so any
+     * consumer — VouchMorph's SwapService/AggregateSigner, or anyone
+     * else — has an unambiguous copy of what to re-verify against,
+     * without needing to reconstruct it (and possibly reconstruct it
+     * wrong) from the rest of the response fields.
+     * ============================================================
      */
     public function createSignedRequest(array $payload, string $requester): array
     {
@@ -165,10 +189,17 @@ class CertificateManager
         
         // Return with requester added AFTER signing
         // requester is NOT part of the signed payload
+        //
+        // FIX: 'original_payload' added — the exact document that was
+        // signed (ksorted, timestamp included, signature/certificate/
+        // requester NOT included since those weren't part of what was
+        // hashed). Any downstream re-verification must use THIS field,
+        // not reconstruct the payload from the rest of the response.
         return array_merge($payloadWithTimestamp, [
             'signature' => base64_encode($signature),
             'requester' => $requester,  // ← Added AFTER signing
-            'certificate' => $this->myCertificate
+            'certificate' => $this->myCertificate,
+            'original_payload' => $payloadWithTimestamp,  // ← FIX: exact signed document
         ]);
     }
     
@@ -201,11 +232,15 @@ class CertificateManager
         }
         
         // Prepare payload for verification
-        // Remove signature, certificate, AND requester (requester was added AFTER signing)
+        // Remove signature, certificate, requester, AND original_payload
+        // (original_payload is metadata about the signed document, not
+        // part of the document itself — leaving it in would change what
+        // gets hashed and break verification).
         $payloadToVerify = $request;
         unset($payloadToVerify['signature']);
         unset($payloadToVerify['certificate']);
         unset($payloadToVerify['requester']);  // ← CRITICAL: Remove requester before verification
+        unset($payloadToVerify['original_payload']);  // ← FIX: not part of the signed document
         ksort($payloadToVerify);
         
         $jsonToVerify = json_encode($payloadToVerify, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
@@ -271,9 +306,11 @@ class CertificateManager
         }
         
         // Try verification with requester included
+        // FIX: also strip original_payload — same reasoning as verifySignedRequest() above.
         $payloadToVerify = $response;
         unset($payloadToVerify['signature']);
         unset($payloadToVerify['certificate']);
+        unset($payloadToVerify['original_payload']);
         ksort($payloadToVerify);
         
         $jsonToVerify = json_encode($payloadToVerify, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
@@ -302,6 +339,7 @@ class CertificateManager
             unset($payloadToVerifyNoRequester['signature']);
             unset($payloadToVerifyNoRequester['certificate']);
             unset($payloadToVerifyNoRequester['requester']);
+            unset($payloadToVerifyNoRequester['original_payload']);
             ksort($payloadToVerifyNoRequester);
             
             $jsonToVerifyNoRequester = json_encode($payloadToVerifyNoRequester, JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE);
