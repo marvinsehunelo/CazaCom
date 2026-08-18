@@ -3,7 +3,6 @@
 header("Content-Type: application/json; charset=utf-8");
 require_once __DIR__ . '/../../../../config/db.php';
 require_once __DIR__ . '/../../../../security/ApiAuthenticator.php';
-require_once __DIR__ . '/../../../../helpers/crypto.php';
 use Security\ApiAuthenticator;
 
 // Single Database connection reused for both auth and the queries
