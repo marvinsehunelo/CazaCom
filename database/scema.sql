@@ -685,3 +685,37 @@ CREATE TABLE IF NOT EXISTS vault_ha_locks (
   valid_until TIMESTAMP WITH TIME ZONE NOT NULL,
   CONSTRAINT ha_key PRIMARY KEY (ha_key)
 );
+
+-- ============================================================
+-- RESERVATION ACCOUNTS — dedicated wallet opened for a beneficiary who
+-- hasn't linked a real account yet, replacing the old shared pooled
+-- wallet for unclaimed funds. Also created defensively at runtime by
+-- their respective endpoints (backend/public/api/v1/mno/reservation/
+-- create.php + mtn_momo_participant.php), same as mtn_wallets /
+-- mtn_collections / mtn_transfers already are — this entry documents
+-- the shape but is not the only place the table gets created.
+-- ============================================================
+CREATE TABLE IF NOT EXISTS cazacom_reservation_accounts (
+    id BIGSERIAL PRIMARY KEY,
+    bank_reference VARCHAR(150) UNIQUE NOT NULL,
+    reference VARCHAR(150),
+    user_id INTEGER,
+    currency VARCHAR(10) DEFAULT 'BWP',
+    account_identifier VARCHAR(100) NOT NULL,
+    account_identifier_type VARCHAR(30) DEFAULT 'wallet_id',
+    status VARCHAR(20) DEFAULT 'active',
+    requester VARCHAR(50),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS mtn_reservation_accounts (
+    id BIGSERIAL PRIMARY KEY,
+    bank_reference VARCHAR(150) UNIQUE NOT NULL,
+    reference VARCHAR(150),
+    user_id INTEGER,
+    currency VARCHAR(10) DEFAULT 'BWP',
+    account_identifier VARCHAR(100) NOT NULL,
+    account_identifier_type VARCHAR(30) DEFAULT 'wallet_id',
+    status VARCHAR(20) DEFAULT 'active',
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
