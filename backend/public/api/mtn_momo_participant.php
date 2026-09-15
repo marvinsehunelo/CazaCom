@@ -145,6 +145,8 @@ class MtnMomoParticipant
             'debit_funds' => $this->debitFunds($input),
             'release_hold' => $this->releaseHold($input),
             'process_deposit' => $this->processDeposit($input),
+            'create_reservation_account' => $this->createReservationAccount($input),
+            'reservation_account_status' => $this->reservationAccountStatus($input),
             'check_status' => $this->checkStatus($input['reference'] ?? ''),
             'initiate_cashout' => $this->initiateAgentCashout($input),
             'confirm_cashout' => $this->confirmAgentCashout($input),
@@ -706,6 +708,139 @@ class MtnMomoParticipant
         $this->disbToken = $data['access_token'];
         $this->disbTokenExpiresAt = time() + (int)($data['expires_in'] ?? 3600) - 60;
         return $this->disbToken;
+    }
+
+    // ============================================================
+    // 2b. RESERVATION ACCOUNTS — dedicated wallet opened for a
+    //     beneficiary who hasn't linked a real account yet, replacing
+    //     the old shared pooled wallet for unclaimed funds. Not part
+    //     of MTN's real public API — VouchMorph-local, same as the
+    //     agent cash-out section below.
+    // ============================================================
+
+    /**
+     * createReservationAccount — opens a dedicated MTN wallet for one
+     * beneficiary. bank_reference is the idempotency key VouchMorph
+     * retries with after a timeout/ambiguous response, so this looks
+     * it up first and returns the existing account rather than
+     * creating a second one.
+     */
+    public function createReservationAccount(array $payload): array
+    {
+        $bankReference = $payload['bank_reference'] ?? $payload['reference'] ?? null;
+        if (!$bankReference) {
+            return ['success' => false, 'message' => 'bank_reference is required'];
+        }
+
+        $this->ensureReservationAccountsTable();
+
+        $stmt = $this->db->prepare("SELECT * FROM mtn_reservation_accounts WHERE bank_reference = ?");
+        $stmt->execute([$bankReference]);
+        if ($existing = $stmt->fetch(PDO::FETCH_ASSOC)) {
+            return [
+                'success' => true,
+                'status' => $existing['status'],
+                'account_identifier' => $existing['account_identifier'],
+                'account_identifier_type' => $existing['account_identifier_type'],
+                'message' => 'Reservation account already exists for this bank_reference',
+            ];
+        }
+
+        // Dedicated wallet MSISDN for this beneficiary, same shape as
+        // other MTN MSISDNs in this file — generated, not reused from
+        // a real customer.
+        do {
+            $msisdn = '267' . str_pad((string)random_int(0, 99999999), 8, '0', STR_PAD_LEFT);
+            $stmt = $this->db->prepare("SELECT 1 FROM mtn_wallets WHERE msisdn = ?");
+            $stmt->execute([$msisdn]);
+        } while ($stmt->fetch());
+
+        $this->db->beginTransaction();
+        try {
+            // Same INSERT shape verifyAsset() already uses to auto-provision
+            // a wallet — provisioning it up front here means it's a REAL
+            // wallet immediately usable by verify_asset/wallet_balance/
+            // process_deposit, not just a row in the tracking table below.
+            $this->db->prepare("INSERT INTO mtn_wallets (msisdn, wallet_type, balance) VALUES (?, 'CUSTOMER', 0)")
+                ->execute([$msisdn]);
+
+            $stmt = $this->db->prepare("
+                INSERT INTO mtn_reservation_accounts
+                (bank_reference, reference, user_id, currency, account_identifier, account_identifier_type, status)
+                VALUES (?, ?, ?, ?, ?, 'wallet_id', 'active')
+            ");
+            $stmt->execute([
+                $bankReference,
+                $payload['reference'] ?? $bankReference,
+                $payload['user_id'] ?? null,
+                $payload['currency'] ?? 'BWP',
+                $msisdn,
+            ]);
+
+            $this->db->commit();
+
+            return [
+                'success' => true,
+                'status' => 'active',
+                'account_identifier' => $msisdn,
+                'account_identifier_type' => 'wallet_id',
+                'message' => 'Reservation account created',
+            ];
+        } catch (Exception $e) {
+            $this->db->rollBack();
+            error_log("[MTN MoMo] createReservationAccount failed: " . $e->getMessage());
+            return ['success' => false, 'message' => 'Reservation account creation failed: ' . $e->getMessage()];
+        }
+    }
+
+    public function reservationAccountStatus(array $payload): array
+    {
+        $bankReference = $payload['bank_reference'] ?? null;
+        if (!$bankReference) {
+            return ['success' => false, 'message' => 'bank_reference is required'];
+        }
+
+        $this->ensureReservationAccountsTable();
+
+        $stmt = $this->db->prepare("SELECT * FROM mtn_reservation_accounts WHERE bank_reference = ?");
+        $stmt->execute([$bankReference]);
+        $account = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$account) {
+            return ['success' => false, 'message' => 'Reservation account not found for this bank_reference'];
+        }
+
+        return [
+            'success' => true,
+            'status' => $account['status'],
+            'account_identifier' => $account['account_identifier'],
+            'account_identifier_type' => $account['account_identifier_type'],
+            'message' => 'Reservation account status retrieved',
+        ];
+    }
+
+    /**
+     * mtn_reservation_accounts isn't part of the pre-provisioned schema
+     * (same situation as mtn_wallets/mtn_collections/mtn_transfers,
+     * which this file also assumes already exist) — created defensively
+     * here so this feature works without a separate out-of-band
+     * migration step.
+     */
+    private function ensureReservationAccountsTable(): void
+    {
+        $this->db->exec("
+            CREATE TABLE IF NOT EXISTS mtn_reservation_accounts (
+                id BIGSERIAL PRIMARY KEY,
+                bank_reference VARCHAR(150) UNIQUE NOT NULL,
+                reference VARCHAR(150),
+                user_id INTEGER,
+                currency VARCHAR(10) DEFAULT 'BWP',
+                account_identifier VARCHAR(100) NOT NULL,
+                account_identifier_type VARCHAR(30) DEFAULT 'wallet_id',
+                status VARCHAR(20) DEFAULT 'active',
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ");
     }
 
     // ============================================================
