@@ -59,6 +59,42 @@ try {
     if (!$hold) {
         throw new Exception("Hold not found");
     }
+
+    // ============================================================
+    // PARTIAL CAPTURE (2026-10-15). The amount asked for was ignored and
+    // the whole hold committed: when VouchMorph asked for the P3.30 of fees
+    // on an expired P200 cash-out, the customer lost the whole P200. Now
+    // only the amount asked for is committed; the rest stays HELD under the
+    // same reference and goes back to the wallet on release or expiry. No
+    // amount (or the whole amount) commits the whole hold, as before. More
+    // than is held is refused.
+    // ============================================================
+    $held = round((float)$hold['amount'], 2);
+    $asked = $amount > 0 ? round($amount, 2) : $held;
+    if ($asked - $held > 0.01) {
+        throw new Exception("Debit {$asked} is more than the {$held} held");
+    }
+    if ($held - $asked > 0.01) {
+        $db->prepare("UPDATE financial_holds SET amount = amount - :asked WHERE hold_reference = :ref")
+           ->execute(['asked' => $asked, 'ref' => $holdReference]);
+        $transactionRef = 'TX-' . time() . '-' . bin2hex(random_bytes(8));
+        $db->prepare("
+            INSERT INTO mobile_money_transactions (user_id, type, amount, reference, status, completed_at)
+            VALUES (:user_id, 'debit', :amount, :ref, 'completed', NOW())
+        ")->execute(['user_id' => $hold['user_id'], 'amount' => $asked, 'ref' => $transactionRef]);
+        $db->commit();
+        echo json_encode([
+            "success" => true,
+            "status" => "success",
+            "debited" => true,
+            "partial" => true,
+            "transaction_reference" => $transactionRef,
+            "amount" => $asked,
+            "remaining_held" => round($held - $asked, 2),
+            "hold_status" => "HELD",
+        ]);
+        exit;
+    }
     // Update hold to committed
     $stmt = $db->prepare("
         UPDATE financial_holds
