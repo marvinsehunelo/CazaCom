@@ -115,7 +115,10 @@ try {
             // Hold exists but not in HELD status - already committed or released
             error_log("[CAZACOM release_hold] Hold exists but status is: " . $existingHold['status']);
 
-            if ($existingHold['status'] === 'RELEASED') {
+            // EXPIRED (2026-10-15): expire_holds.php already put the money
+            // back in the wallet. This used to answer "Hold exists but
+            // status is: EXPIRED" as an error, and VouchMorph kept asking.
+            if (in_array($existingHold['status'], ['RELEASED', 'EXPIRED'], true)) {
                 // Already released - treat as success
                 $db->commit();
                 echo json_encode([
@@ -124,19 +127,39 @@ try {
                     "released" => true,
                     "hold_reference" => $holdReference,
                     "amount_released" => (float)$existingHold['amount'],
-                    "message" => "Hold already released",
-                    "already_released" => true
+                    "message" => "Hold already released (status: {$existingHold['status']})",
+                    "already_released" => true,
+                    "hold_status" => $existingHold['status']
                 ]);
                 exit;
             } elseif ($existingHold['status'] === 'COMMITTED' || $existingHold['status'] === 'DEBITED') {
-                // Already debited - cannot release
-                throw new Exception("Hold already committed/debited, cannot release");
+                // Already debited - cannot release. Said plainly, so the
+                // caller stops asking and can reconcile.
+                $db->rollBack();
+                echo json_encode([
+                    "success" => false,
+                    "status" => "error",
+                    "released" => false,
+                    "hold_status" => $existingHold['status'],
+                    "hold_reference" => $holdReference,
+                    "message" => "Hold already committed/debited, cannot release (status: {$existingHold['status']})"
+                ]);
+                exit;
             } else {
                 throw new Exception("Hold exists but status is: " . $existingHold['status']);
             }
         }
 
-        throw new Exception("Hold not found");
+        $db->rollBack();
+        echo json_encode([
+            "success" => false,
+            "status" => "error",
+            "released" => false,
+            "hold_status" => "NOT_FOUND",
+            "hold_reference" => $holdReference,
+            "message" => "Hold not found"
+        ]);
+        exit;
     }
 
     error_log("[CAZACOM release_hold] Found hold: user_id=" . $hold['user_id'] . ", amount=" . $hold['amount']);
